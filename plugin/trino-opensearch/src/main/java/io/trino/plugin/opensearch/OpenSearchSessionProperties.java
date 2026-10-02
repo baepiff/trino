@@ -27,6 +27,7 @@ public final class OpenSearchSessionProperties
         implements SessionPropertiesProvider
 {
     private static final String PROJECTION_PUSHDOWN_ENABLED = "projection_pushdown_enabled";
+    private static final String AGGREGATION_PUSHDOWN_ENABLED = "aggregation_pushdown_enabled";
 
     private final List<PropertyMetadata<?>> sessionProperties;
 
@@ -38,6 +39,11 @@ public final class OpenSearchSessionProperties
                         PROJECTION_PUSHDOWN_ENABLED,
                         "Read only required fields from a row type",
                         openSearchConfig.isProjectionPushdownEnabled(),
+                        false))
+                .add(booleanProperty(
+                        AGGREGATION_PUSHDOWN_ENABLED,
+                        "Push down supported aggregations to OpenSearch",
+                        openSearchConfig.isAggregationPushdownEnabled(),
                         false))
                 .build();
     }
@@ -51,5 +57,10 @@ public final class OpenSearchSessionProperties
     public static boolean isProjectionPushdownEnabled(ConnectorSession session)
     {
         return session.getProperty(PROJECTION_PUSHDOWN_ENABLED, Boolean.class);
+    }
+
+    public static boolean isAggregationPushdownEnabled(ConnectorSession session)
+    {
+        return session.getProperty(AGGREGATION_PUSHDOWN_ENABLED, Boolean.class);
     }
 }
