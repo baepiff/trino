@@ -22,6 +22,8 @@ import io.trino.plugin.opensearch.client.OpenSearchClient;
 import io.trino.plugin.opensearch.decoders.BigintDecoder;
 import io.trino.plugin.opensearch.decoders.DoubleDecoder;
 import io.trino.plugin.opensearch.decoders.IntegerDecoder;
+import io.trino.plugin.opensearch.decoders.RawJsonDecoder;
+import io.trino.plugin.opensearch.decoders.TimestampDecoder;
 import io.trino.plugin.opensearch.decoders.VarcharDecoder;
 import io.trino.spi.connector.AggregateFunction;
 import io.trino.spi.connector.AggregationApplicationResult;
@@ -52,6 +54,7 @@ import static io.trino.plugin.opensearch.OpenSearchTableHandle.Type.SCAN;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
+import static io.trino.spi.type.TimestampType.TIMESTAMP_MILLIS;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -111,7 +114,7 @@ public class TestOpenSearchMetadata
     @Test
     public void testApplyLimitKeepsSortItemsWhenNarrowing()
     {
-        TopN existing = new TopN(10, ImmutableList.of(new TopNSortItem("regionkey", SortOrder.DESC_NULLS_FIRST)));
+        TopN existing = new TopN(10, ImmutableList.of(new TopNSortItem("regionkey", SortOrder.DESC_NULLS_FIRST, Optional.of("long"))));
 
         LimitApplicationResult<ConnectorTableHandle> result = metadata.applyLimit(SESSION, scanHandle().withTopN(existing), 5).orElseThrow();
 
@@ -146,8 +149,8 @@ public class TestOpenSearchMetadata
         assertThat(((OpenSearchTableHandle) result.getHandle()).topN()).hasValue(new TopN(
                 5,
                 List.of(
-                        new TopNSortItem("regionkey", SortOrder.DESC_NULLS_FIRST),
-                        new TopNSortItem("name", SortOrder.ASC_NULLS_LAST))));
+                        new TopNSortItem("regionkey", SortOrder.DESC_NULLS_FIRST, Optional.of("long")),
+                        new TopNSortItem("name", SortOrder.ASC_NULLS_LAST, Optional.of("keyword")))));
         assertThat(result.isTopNGuaranteed()).isFalse();
     }
 
@@ -161,6 +164,48 @@ public class TestOpenSearchMetadata
                 List.of(new SortItem("description", SortOrder.ASC_NULLS_LAST)),
                 Map.of("description", textColumn("description"))))
                 .isEmpty();
+    }
+
+    @Test
+    public void testApplyTopNUsesOpenSearchTypeAsUnmappedType()
+    {
+        OpenSearchColumnHandle timestamp = new OpenSearchColumnHandle(
+                List.of("created"),
+                TIMESTAMP_MILLIS,
+                new IndexMetadata.DateTimeType(List.of("strict_date_optional_time")),
+                new TimestampDecoder.Descriptor("created"),
+                true);
+
+        TopNApplicationResult<ConnectorTableHandle> result = metadata.applyTopN(
+                        SESSION,
+                        scanHandle(),
+                        5,
+                        List.of(new SortItem("created", SortOrder.ASC_NULLS_FIRST), new SortItem("value", SortOrder.DESC_NULLS_LAST)),
+                        Map.of("created", timestamp, "value", integerColumn("value")))
+                .orElseThrow();
+
+        assertThat(((OpenSearchTableHandle) result.getHandle()).topN().orElseThrow().sortItems()).containsExactly(
+                new TopNSortItem("created", SortOrder.ASC_NULLS_FIRST, Optional.of("date")),
+                new TopNSortItem("value", SortOrder.DESC_NULLS_LAST, Optional.of("integer")));
+    }
+
+    @Test
+    public void testApplyTopNRejectsColumnsWithoutPlainDocValues()
+    {
+        // _id reports supportsPredicates but sorting on it requires _id fielddata
+        OpenSearchColumnHandle id = (OpenSearchColumnHandle) BuiltinColumns.ID.getColumnHandle();
+        assertThat(id.supportsPredicates()).isTrue();
+        assertThat(applyTopN(id)).isEmpty();
+
+        // the Trino value is the JSON text of the whole field, which OpenSearch cannot sort by
+        OpenSearchColumnHandle rawJson = new OpenSearchColumnHandle(List.of("payload"), VARCHAR, new IndexMetadata.PrimitiveType("keyword"), new RawJsonDecoder.Descriptor("payload"), true);
+        assertThat(applyTopN(rawJson)).isEmpty();
+
+        // no OpenSearch type name is known for the unmapped_type of the sort
+        OpenSearchColumnHandle scaledFloat = new OpenSearchColumnHandle(List.of("price"), DOUBLE, new IndexMetadata.ScaledFloatType(100), new DoubleDecoder.Descriptor("price"), true);
+        assertThat(applyTopN(scaledFloat)).isEmpty();
+
+        assertThat(applyTopN(keywordColumn("name"))).isPresent();
     }
 
     @Test
@@ -308,6 +353,16 @@ public class TestOpenSearchMetadata
         // the same constraint is accepted for a scan, so the rejection is caused by the aggregation
         assertThat(metadata.applyFilter(SESSION, scanHandle(), constraint)).isPresent();
         assertThat(metadata.applyFilter(SESSION, aggregationHandle(), constraint)).isEmpty();
+    }
+
+    private Optional<TopNApplicationResult<ConnectorTableHandle>> applyTopN(OpenSearchColumnHandle column)
+    {
+        return metadata.applyTopN(
+                SESSION,
+                scanHandle(),
+                5,
+                List.of(new SortItem(column.name(), SortOrder.ASC_NULLS_LAST)),
+                Map.of(column.name(), column));
     }
 
     private static String likeToRegexp(String pattern, Optional<String> escapeChar)

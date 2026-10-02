@@ -20,6 +20,7 @@ import org.opensearch.search.sort.SortBuilder;
 import org.opensearch.search.sort.SortBuilders;
 
 import java.util.List;
+import java.util.Optional;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static java.util.Objects.requireNonNull;
@@ -37,20 +38,26 @@ public record TopN(long limit, List<TopNSortItem> sortItems)
         return new TopN(limit, ImmutableList.of());
     }
 
-    public record TopNSortItem(String field, SortOrder order)
+    /**
+     * @param unmappedType the OpenSearch field type used when an index of an alias or wildcard table does not map the field,
+     *         without it the sort fails instead of treating the field as missing
+     */
+    public record TopNSortItem(String field, SortOrder order, Optional<String> unmappedType)
     {
         // sorting by _doc (index order) gets special treatment in OpenSearch and is more efficient
-        public static final TopNSortItem SORT_BY_DOC = new TopNSortItem("_doc", SortOrder.ASC_NULLS_LAST);
+        public static final TopNSortItem SORT_BY_DOC = new TopNSortItem("_doc", SortOrder.ASC_NULLS_LAST, Optional.empty());
 
         public TopNSortItem
         {
             requireNonNull(field, "field is null");
             requireNonNull(order, "order is null");
+            requireNonNull(unmappedType, "unmappedType is null");
         }
 
         public SortBuilder<?> toSortBuilder()
         {
             FieldSortBuilder sortBuilder = SortBuilders.fieldSort(field);
+            unmappedType.ifPresent(sortBuilder::unmappedType);
             if (order.isAscending()) {
                 sortBuilder.order(org.opensearch.search.sort.SortOrder.ASC);
             }

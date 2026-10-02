@@ -392,8 +392,8 @@ public abstract class BaseOpenSearchConnectorTest
             assertThat(query(format("SELECT g, count(*) FROM %s WHERE g = 'no_such_group' GROUP BY g", tableName)))
                     .returnsEmptyResult();
 
-            // two buckets per request force pagination, including a NULL group key in the after_key
-            try (QueryAssertions assertions = new QueryAssertions(createAdHocQueryRunner(Map.of("opensearch.max-aggregation-buckets", "2")))) {
+            // a single bucket per request forces pagination (pages: NULL, a, b, c), so the NULL group key is sent back in the after_key
+            try (QueryAssertions assertions = new QueryAssertions(createAdHocQueryRunner(Map.of("opensearch.max-aggregation-buckets", "1")))) {
                 assertThat(assertions.query(groupedQuery)).matches(expected).isFullyPushedDown();
             }
         }
