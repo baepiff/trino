@@ -595,7 +595,9 @@ public class OpenSearchMetadata
                 newRegexes,
                 handle.query(),
                 handle.topN(),
-                ImmutableSet.of());
+                ImmutableSet.of(),
+                handle.termAggregations(),
+                handle.metricAggregations());
 
         return Optional.of(new ConstraintApplicationResult<>(handle, TupleDomain.withColumnDomains(unsupported), newExpression, false));
     }
