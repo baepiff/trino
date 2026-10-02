@@ -17,6 +17,7 @@ import io.trino.plugin.opensearch.client.IndexMetadata;
 import io.trino.plugin.opensearch.decoders.BooleanDecoder;
 import io.trino.plugin.opensearch.decoders.DoubleDecoder;
 import io.trino.plugin.opensearch.decoders.IntegerDecoder;
+import io.trino.plugin.opensearch.decoders.RawJsonDecoder;
 import io.trino.plugin.opensearch.decoders.RealDecoder;
 import io.trino.spi.connector.AggregateFunction;
 import io.trino.spi.connector.ColumnHandle;
@@ -62,6 +63,20 @@ public class TestAggregationModel
         assertThat(TermAggregation.fromColumn(column("price", DOUBLE, "double", true))).isEmpty();
         assertThat(TermAggregation.fromColumn(column("rating", REAL, "float", true))).isEmpty();
         assertThat(TermAggregation.fromColumn(column("_id", VARCHAR, "text", true))).isEmpty();
+    }
+
+    @Test
+    public void testRawJsonColumnsAreNotPushed()
+    {
+        OpenSearchColumnHandle rawJson = new OpenSearchColumnHandle(List.of("payload"), VARCHAR, new IndexMetadata.PrimitiveType("keyword"), new RawJsonDecoder.Descriptor("payload"), true);
+
+        assertThat(TermAggregation.fromColumn(rawJson)).isEmpty();
+        for (String name : List.of("count", "min", "max", "sum", "avg")) {
+            assertThat(MetricAggregation.from(function(name, BIGINT, "payload", VARCHAR), Map.of("payload", rawJson), "a")).as(name).isEmpty();
+        }
+        // the same keyword mapping without the raw JSON transform is pushed
+        assertThat(TermAggregation.fromColumn(keywordColumn("payload"))).isPresent();
+        assertThat(MetricAggregation.from(function("count", BIGINT, "payload", VARCHAR), Map.of("payload", keywordColumn("payload")), "a")).isPresent();
     }
 
     @Test

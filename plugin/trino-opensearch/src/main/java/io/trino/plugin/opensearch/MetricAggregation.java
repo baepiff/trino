@@ -23,7 +23,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
-import static io.trino.plugin.opensearch.BuiltinColumns.isBuiltinColumn;
+import static io.trino.plugin.opensearch.PushdownColumns.isDocValuesPushdownSupported;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.RealType.REAL;
@@ -68,8 +68,7 @@ public record MetricAggregation(String functionName, Type outputType, Optional<O
             return Optional.empty();
         }
         if (!(assignments.get(variable.getName()) instanceof OpenSearchColumnHandle column)
-                || !column.supportsPredicates()
-                || isBuiltinColumn(column.name())
+                || !isDocValuesPushdownSupported(column)
                 || !isSupportedInput(functionName, column.type())) {
             return Optional.empty();
         }

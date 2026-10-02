@@ -530,16 +530,28 @@ Aggregation push down is applied only when all of the following hold:
 * The query groups by none or by columns of type `VARCHAR` (`keyword`),
   `TINYINT`, `SMALLINT`, `INTEGER`, `BIGINT`, or `BOOLEAN`, with a single
   grouping set. `GROUPING SETS`, `CUBE` and `ROLLUP` are not pushed down.
-* The aggregate arguments are plain columns that support predicate push down.
+* The group-by columns and aggregate arguments are plain columns that support
+  predicate push down. Built-in columns such as `_id` and columns with a raw
+  JSON transform are not pushed down.
 * The aggregates do not use `DISTINCT`, a `FILTER` clause, or an `ORDER BY`
   clause.
 * The table is not accessed with the `raw_query` table function.
+* The query does not already have a pushed-down limit or TopN. For example,
+  `SELECT count(*) FROM (SELECT * FROM t LIMIT 10)` is not pushed down.
 
 `min`, `max`, `sum` and `avg` over `BIGINT` columns are not pushed down because
 OpenSearch computes metric aggregations with double precision, which cannot
 represent all `BIGINT` values. `sum` over integer columns is computed in double
-precision and is exact up to 2^53. `min` and `max` over `keyword` columns are
-not pushed down.
+precision and is exact up to 2^53. Larger sums can lose precision, and a sum
+outside the `BIGINT` range is clamped instead of failing. `min` and `max` over
+`keyword` columns are not pushed down.
+
+Pushed-down aggregation, sorting and grouping use the OpenSearch doc values of
+a field, so the result can differ from a computation in Trino for `keyword`
+fields that use a `normalizer`, `ignore_above`, `copy_to`, or
+`doc_values: false`. The aggregation search applies the filter of an index
+alias, as a regular search does. A failed shard fails the query instead of
+returning partial results.
 
 Set `opensearch.aggregation-pushdown-enabled` to `false` to disable aggregation
 push down.
@@ -549,7 +561,11 @@ push down.
 
 The connector supports [TopN push down](topn-pushdown) for queries with
 `ORDER BY ... LIMIT n`. It is applied when every sort column supports predicate
-push down. Each shard returns its sorted top `n` rows and Trino merges them.
+push down. Built-in columns such as `_id` and columns with a raw JSON transform
+are not pushed down. Each shard returns its sorted top `n` rows and Trino
+merges them. The sort uses the OpenSearch doc values of the field. Indices of an
+alias or wildcard table that do not map a sort column are treated as having no
+value for it.
 
 [built-in date formats]: https://opensearch.org/docs/latest/field-types/supported-field-types/date/#custom-formats
 [custom date formats]: https://opensearch.org/docs/latest/field-types/supported-field-types/date/#custom-formats

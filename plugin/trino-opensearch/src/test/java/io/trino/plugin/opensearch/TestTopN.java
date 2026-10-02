@@ -19,6 +19,8 @@ import io.trino.spi.connector.SortOrder;
 import org.junit.jupiter.api.Test;
 import org.opensearch.search.sort.SortBuilders;
 
+import java.util.Optional;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -27,14 +29,31 @@ public class TestTopN
     @Test
     public void testSortBuilderMapsDirectionAndNullOrdering()
     {
-        assertThat(new TopNSortItem("field", SortOrder.ASC_NULLS_LAST).toSortBuilder())
+        assertThat(new TopNSortItem("field", SortOrder.ASC_NULLS_LAST, Optional.empty()).toSortBuilder())
                 .isEqualTo(SortBuilders.fieldSort("field").order(org.opensearch.search.sort.SortOrder.ASC));
-        assertThat(new TopNSortItem("field", SortOrder.ASC_NULLS_FIRST).toSortBuilder())
+        assertThat(new TopNSortItem("field", SortOrder.ASC_NULLS_FIRST, Optional.empty()).toSortBuilder())
                 .isEqualTo(SortBuilders.fieldSort("field").order(org.opensearch.search.sort.SortOrder.ASC).missing("_first"));
-        assertThat(new TopNSortItem("field", SortOrder.DESC_NULLS_LAST).toSortBuilder())
+        assertThat(new TopNSortItem("field", SortOrder.DESC_NULLS_LAST, Optional.empty()).toSortBuilder())
                 .isEqualTo(SortBuilders.fieldSort("field").order(org.opensearch.search.sort.SortOrder.DESC));
-        assertThat(new TopNSortItem("field", SortOrder.DESC_NULLS_FIRST).toSortBuilder())
+        assertThat(new TopNSortItem("field", SortOrder.DESC_NULLS_FIRST, Optional.empty()).toSortBuilder())
                 .isEqualTo(SortBuilders.fieldSort("field").order(org.opensearch.search.sort.SortOrder.DESC).missing("_first"));
+    }
+
+    @Test
+    public void testSortBuilderSetsUnmappedType()
+    {
+        assertThat(new TopNSortItem("field", SortOrder.ASC_NULLS_FIRST, Optional.of("long")).toSortBuilder())
+                .isEqualTo(SortBuilders.fieldSort("field").order(org.opensearch.search.sort.SortOrder.ASC).missing("_first").unmappedType("long"));
+        assertThat(new TopNSortItem("field", SortOrder.DESC_NULLS_LAST, Optional.of("keyword")).toSortBuilder())
+                .isEqualTo(SortBuilders.fieldSort("field").order(org.opensearch.search.sort.SortOrder.DESC).unmappedType("keyword"));
+    }
+
+    @Test
+    public void testSortByDocHasNoUnmappedType()
+    {
+        assertThat(TopNSortItem.SORT_BY_DOC.unmappedType()).isEmpty();
+        assertThat(TopNSortItem.SORT_BY_DOC.toSortBuilder())
+                .isEqualTo(SortBuilders.fieldSort("_doc").order(org.opensearch.search.sort.SortOrder.ASC));
     }
 
     @Test
