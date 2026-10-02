@@ -18,7 +18,7 @@ import io.trino.spi.type.VarcharType;
 
 import java.util.Optional;
 
-import static io.trino.plugin.opensearch.BuiltinColumns.isBuiltinColumn;
+import static io.trino.plugin.opensearch.PushdownColumns.isDocValuesPushdownSupported;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.IntegerType.INTEGER;
@@ -36,7 +36,7 @@ public record TermAggregation(String term, Type type)
 
     public static Optional<TermAggregation> fromColumn(OpenSearchColumnHandle column)
     {
-        if (!column.supportsPredicates() || isBuiltinColumn(column.name()) || !isSupportedGroupingType(column.type())) {
+        if (!isDocValuesPushdownSupported(column) || !isSupportedGroupingType(column.type())) {
             return Optional.empty();
         }
         return Optional.of(new TermAggregation(column.name(), column.type()));

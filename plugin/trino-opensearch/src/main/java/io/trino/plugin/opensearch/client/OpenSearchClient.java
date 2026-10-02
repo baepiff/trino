@@ -639,6 +639,8 @@ public class OpenSearchClient
 
         SearchRequest request = new SearchRequest(index)
                 .searchType(QUERY_THEN_FETCH)
+                // a failed shard must fail the query, otherwise counts and sums silently miss that shard's documents
+                .allowPartialSearchResults(false)
                 .source(sourceBuilder);
 
         return search(request);

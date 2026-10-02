@@ -117,6 +117,7 @@ import static io.trino.plugin.opensearch.OpenSearchErrorCode.OPENSEARCH_INVALID_
 import static io.trino.plugin.opensearch.OpenSearchSessionProperties.isAggregationPushdownEnabled;
 import static io.trino.plugin.opensearch.OpenSearchSessionProperties.isProjectionPushdownEnabled;
 import static io.trino.plugin.opensearch.OpenSearchTableHandle.Type.AGGREGATION;
+import static io.trino.plugin.opensearch.PushdownColumns.isDocValuesPushdownSupported;
 import static io.trino.spi.StandardErrorCode.INVALID_FUNCTION_ARGUMENT;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.expression.StandardFunctions.LIKE_FUNCTION_NAME;
@@ -527,14 +528,26 @@ public class OpenSearchMetadata
         for (SortItem sortItem : sortItems) {
             OpenSearchColumnHandle column = (OpenSearchColumnHandle) assignments.get(sortItem.getName());
             verifyNotNull(column, "No assignment for %s", sortItem.getName());
-            if (!column.supportsPredicates()) {
+            Optional<String> unmappedType = unmappedSortType(column.opensearchType());
+            if (!isDocValuesPushdownSupported(column) || unmappedType.isEmpty()) {
                 return Optional.empty();
             }
-            topNSortItems.add(new TopNSortItem(column.name(), sortItem.getSortOrder()));
+            topNSortItems.add(new TopNSortItem(column.name(), sortItem.getSortOrder(), unmappedType));
         }
 
         // every shard returns its local top n and Trino merges them, so the TopN is not guaranteed
         return Optional.of(new TopNApplicationResult<>(handle.withTopN(new TopN(topNCount, topNSortItems.build())), false, false));
+    }
+
+    private static Optional<String> unmappedSortType(IndexMetadata.Type type)
+    {
+        if (type instanceof PrimitiveType primitiveType) {
+            return Optional.of(primitiveType.name());
+        }
+        if (type instanceof DateTimeType) {
+            return Optional.of("date");
+        }
+        return Optional.empty();
     }
 
     @Override

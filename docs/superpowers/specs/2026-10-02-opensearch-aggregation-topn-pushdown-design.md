@@ -30,7 +30,8 @@ Push `GROUP BY` aggregations and `ORDER BY ... LIMIT` (TopN) from Trino into Ope
 New classes, all in package `io.trino.plugin.opensearch` (the builtin-column check needs the package-private `BuiltinColumns`):
 
 - `TopN(long limit, List<TopNSortItem> sortItems)`. Empty `sortItems` means a plain `LIMIT`.
-  `TopNSortItem(String field, SortOrder order)` converts to an OpenSearch `FieldSortBuilder`.
+  `TopNSortItem(String field, SortOrder order, Optional<String> unmappedType)` converts to an OpenSearch `FieldSortBuilder`.
+  `unmappedType` is the OpenSearch field type name, sent as `unmapped_type` so an alias or wildcard table over indices that do not all map the field sorts them as missing instead of failing. The default `_doc` sort has none.
   `NULLS FIRST` maps to `missing("_first")`, `NULLS LAST` is the default `_last`.
   No `NO_LIMIT` sentinel: a `TopN` exists only when there is a limit.
 - `MetricAggregation(functionName, outputType, Optional<OpenSearchColumnHandle> columnHandle, alias)`.
@@ -59,6 +60,7 @@ Per aggregate:
   because OpenSearch accumulates in double while Trino accumulates in single precision, so results can differ.
   `COUNT(col)` accepts any predicate-capable column including `BIGINT` and keyword.
 - Builtin columns (`_id`, `_source`, `_score`) are never used as aggregate arguments or group-by columns (`_id` reports `supportsPredicates=true`, but OpenSearch cannot aggregate on it).
+- Columns read with a raw JSON decoder are never used as aggregate arguments (including `count(col)`) or group-by columns: their Trino value is the JSON text of the whole field, which OpenSearch does not aggregate on. One package-private helper (`PushdownColumns`) holds this check for aggregation and TopN.
 - The output type needs a decoder (real, double, tinyint, smallint, integer, bigint, varchar, boolean).
 
 Group-by columns must support predicates and be keyword, integral numeric or boolean.
@@ -72,7 +74,7 @@ so Trino drops its own aggregation node.
 ### `applyTopN`
 
 Returns empty for a passthrough query, an `AGGREGATION` handle, or a handle that already has a `topN`.
-Every sort column must support predicates. `text`, `scaled_float`, arrays and rows are rejected.
+Every sort column must support predicates and must not be a builtin or raw JSON column (`_id` reports `supportsPredicates=true`, but sorting on it needs `_id` fielddata). `text`, `scaled_float`, arrays and rows are rejected. `TopNSortItem.unmappedType` is filled from the column's OpenSearch type: the primitive type name, or `date` for date columns.
 Returns `TopNApplicationResult(handle, topNGuaranteed=false, precalculateStatistics=false)`:
 each shard returns its local top n and Trino merges.
 
@@ -94,8 +96,8 @@ each shard returns its local top n and Trino merges.
 - `OpenSearchSplitManager`: an `AGGREGATION` table gets a single split covering the whole index (as for `QUERY`), so OpenSearch merges shard results.
 - `OpenSearchPageSourceProvider`: routes `AGGREGATION` to the new `AggregateQueryPageSource`, passing the bucket page size.
 - `OpenSearchClient`:
-  - `beginSearch(...)` takes `Optional<TopN>` instead of `Optional<String> sort, OptionalLong limit`, and applies sort items. Scroll is unchanged.
-  - New `beginAggregationSearch(index, query, aggregations)`: `size=0`, `trackTotalHits(true)`, no scroll, no shard preference.
+  - `beginSearch(...)` takes `List<TopNSortItem> sortItems, OptionalLong limit` instead of `Optional<String> sort, OptionalLong limit`, and applies the sort items. Scroll is unchanged.
+  - New `beginAggregationSearch(index, query, aggregations)`: `size=0`, `trackTotalHits(true)`, no scroll, no shard preference, partial search results disallowed (a failed shard fails the query instead of returning too-low counts).
 - `OpenSearchQueryBuilder.buildAggregationQuery(termAggregations, metricAggregations, pageSize, after)`:
   - with group-by: a `composite` aggregation, one `terms` source per column with `missingBucket(true)`, metric sub-aggregations, `aggregateAfter` for pagination;
   - without group-by: top-level metric aggregations;
@@ -122,7 +124,7 @@ Unit:
 - `TestOpenSearchConfig`: defaults and explicit mappings for the two new properties.
 - `TestOpenSearchMetadata`: `applyAggregation` accepted and each rejection reason; `applyTopN` accepted and rejected columns, existing `topN`, aggregation handle, passthrough; `applyLimit` and `applyFilter` over an aggregation handle.
 - `TestOpenSearchQueryBuilder`: aggregation request JSON for global, grouped, multi-key and paginated cases; sort item null ordering for all four direction and null combinations.
-- `TestAggregateQueryPageSource` with hand-written responses (no mocks): global, grouped, NULL group, empty input, pagination.
+- `TestAggregationResponseReader` with hand-written responses (no mocks): global, grouped, NULL group, empty input, pagination.
 
 Integration (`BaseOpenSearchConnectorTest`, Docker required):
 

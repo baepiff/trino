@@ -45,6 +45,7 @@ public class AggregateQueryPageSource
     private final OpenSearchClient client;
     private final OpenSearchTableHandle table;
     private final List<OpenSearchColumnHandle> columns;
+    private final List<String> columnNames;
     private final List<Decoder> decoders;
     private final QueryBuilder query;
     private final int pageSize;
@@ -58,6 +59,9 @@ public class AggregateQueryPageSource
         this.client = requireNonNull(client, "client is null");
         this.table = requireNonNull(table, "table is null");
         this.columns = ImmutableList.copyOf(requireNonNull(columns, "columns is null"));
+        this.columnNames = this.columns.stream()
+                .map(OpenSearchColumnHandle::name)
+                .collect(toImmutableList());
         this.decoders = this.columns.stream()
                 .map(OpenSearchColumnHandle::decoderDescriptor)
                 .map(DecoderDescriptor::createDecoder)
@@ -122,7 +126,7 @@ public class AggregateQueryPageSource
         }
         for (Map<String, Object> row : result.rows()) {
             for (int i = 0; i < builders.length; i++) {
-                String name = columns.get(i).name();
+                String name = columnNames.get(i);
                 decoders.get(i).decode(NO_HIT, () -> row.get(name), builders[i]);
             }
         }
