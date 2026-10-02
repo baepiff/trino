@@ -28,6 +28,7 @@ import io.trino.spi.type.TypeManager;
 import java.util.List;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static io.trino.plugin.opensearch.OpenSearchTableHandle.Type.AGGREGATION;
 import static io.trino.plugin.opensearch.OpenSearchTableHandle.Type.QUERY;
 import static java.util.Objects.requireNonNull;
 
@@ -36,12 +37,14 @@ public class OpenSearchPageSourceProvider
 {
     private final OpenSearchClient client;
     private final TypeManager typeManager;
+    private final int maxAggregationBuckets;
 
     @Inject
-    public OpenSearchPageSourceProvider(OpenSearchClient client, TypeManager typeManager)
+    public OpenSearchPageSourceProvider(OpenSearchClient client, TypeManager typeManager, OpenSearchConfig config)
     {
         this.client = requireNonNull(client, "client is null");
         this.typeManager = requireNonNull(typeManager, "typeManager is null");
+        this.maxAggregationBuckets = requireNonNull(config, "config is null").getMaxAggregationBuckets();
     }
 
     @Override
@@ -61,6 +64,16 @@ public class OpenSearchPageSourceProvider
 
         if (opensearchTable.type().equals(QUERY)) {
             return new PassthroughQueryPageSource(client, opensearchTable);
+        }
+
+        if (opensearchTable.type().equals(AGGREGATION)) {
+            return new AggregateQueryPageSource(
+                    client,
+                    opensearchTable,
+                    columns.stream()
+                            .map(OpenSearchColumnHandle.class::cast)
+                            .collect(toImmutableList()),
+                    maxAggregationBuckets);
         }
 
         if (columns.isEmpty()) {
