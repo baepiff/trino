@@ -44,6 +44,8 @@ import io.trino.plugin.opensearch.decoders.VarbinaryDecoder;
 import io.trino.plugin.opensearch.decoders.VarcharDecoder;
 import io.trino.plugin.opensearch.ptf.RawQuery.RawQueryFunctionHandle;
 import io.trino.spi.TrinoException;
+import io.trino.spi.connector.AggregateFunction;
+import io.trino.spi.connector.AggregationApplicationResult;
 import io.trino.spi.connector.Assignment;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
@@ -101,6 +103,7 @@ import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Verify.verify;
 import static com.google.common.base.Verify.verifyNotNull;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
@@ -111,7 +114,9 @@ import static io.airlift.slice.SliceUtf8.lengthOfCodePoint;
 import static io.trino.plugin.base.projection.ApplyProjectionUtil.extractSupportedProjectedColumns;
 import static io.trino.plugin.base.projection.ApplyProjectionUtil.replaceWithNewVariables;
 import static io.trino.plugin.opensearch.OpenSearchErrorCode.OPENSEARCH_INVALID_METADATA;
+import static io.trino.plugin.opensearch.OpenSearchSessionProperties.isAggregationPushdownEnabled;
 import static io.trino.plugin.opensearch.OpenSearchSessionProperties.isProjectionPushdownEnabled;
+import static io.trino.plugin.opensearch.OpenSearchTableHandle.Type.AGGREGATION;
 import static io.trino.spi.StandardErrorCode.INVALID_FUNCTION_ARGUMENT;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
 import static io.trino.spi.expression.StandardFunctions.LIKE_FUNCTION_NAME;
@@ -136,6 +141,7 @@ public class OpenSearchMetadata
 {
     private static final Logger log = Logger.get(OpenSearchMetadata.class);
 
+    private static final String SYNTHETIC_COLUMN_NAME_PREFIX = "_pushdown_";
     private static final String PASSTHROUGH_QUERY_RESULT_COLUMN_NAME = "result";
     private static final ColumnMetadata PASSTHROUGH_QUERY_RESULT_COLUMN_METADATA = ColumnMetadata.builder()
             .setName(PASSTHROUGH_QUERY_RESULT_COLUMN_NAME)
@@ -479,6 +485,10 @@ public class OpenSearchMetadata
             // limit pushdown currently not supported passthrough query
             return Optional.empty();
         }
+        if (handle.type() == AGGREGATION) {
+            // pushing a limit, sort or filter below an already pushed aggregation would change its meaning
+            return Optional.empty();
+        }
 
         if (handle.topN().isPresent() && handle.topN().orElseThrow().limit() <= limit) {
             return Optional.empty();
@@ -505,6 +515,10 @@ public class OpenSearchMetadata
             // TopN pushdown currently not supported for passthrough query
             return Optional.empty();
         }
+        if (handle.type() == AGGREGATION) {
+            // pushing a limit, sort or filter below an already pushed aggregation would change its meaning
+            return Optional.empty();
+        }
         if (handle.topN().isPresent()) {
             return Optional.empty();
         }
@@ -524,12 +538,103 @@ public class OpenSearchMetadata
     }
 
     @Override
+    public Optional<AggregationApplicationResult<ConnectorTableHandle>> applyAggregation(
+            ConnectorSession session,
+            ConnectorTableHandle table,
+            List<AggregateFunction> aggregates,
+            Map<String, ColumnHandle> assignments,
+            List<List<ColumnHandle>> groupingSets)
+    {
+        if (!isAggregationPushdownEnabled(session)) {
+            return Optional.empty();
+        }
+
+        OpenSearchTableHandle handle = (OpenSearchTableHandle) table;
+        if (isPassthroughQuery(handle) || handle.type() == AGGREGATION || handle.topN().isPresent()) {
+            return Optional.empty();
+        }
+
+        // Global aggregation is represented by [[]]
+        verify(!groupingSets.isEmpty(), "No grouping sets provided");
+        if (groupingSets.size() != 1) {
+            // GROUPING SETS, CUBE and ROLLUP are not supported
+            return Optional.empty();
+        }
+
+        ImmutableList.Builder<TermAggregation> termAggregations = ImmutableList.builder();
+        for (ColumnHandle columnHandle : groupingSets.getFirst()) {
+            Optional<TermAggregation> termAggregation = TermAggregation.fromColumn((OpenSearchColumnHandle) columnHandle);
+            if (termAggregation.isEmpty()) {
+                return Optional.empty();
+            }
+            termAggregations.add(termAggregation.get());
+        }
+
+        ImmutableList.Builder<MetricAggregation> metricAggregations = ImmutableList.builder();
+        ImmutableList.Builder<ConnectorExpression> projections = ImmutableList.builder();
+        ImmutableList.Builder<Assignment> resultAssignments = ImmutableList.builder();
+        for (int index = 0; index < aggregates.size(); index++) {
+            AggregateFunction function = aggregates.get(index);
+            String name = SYNTHETIC_COLUMN_NAME_PREFIX + index;
+
+            Optional<MetricAggregation> metricAggregation = MetricAggregation.from(function, assignments, name);
+            Optional<OpenSearchColumnHandle> outputColumn = aggregationOutputColumn(name, function.getOutputType());
+            if (metricAggregation.isEmpty() || outputColumn.isEmpty()) {
+                return Optional.empty();
+            }
+            metricAggregations.add(metricAggregation.get());
+            projections.add(new Variable(name, function.getOutputType()));
+            resultAssignments.add(new Assignment(name, outputColumn.get(), function.getOutputType()));
+        }
+
+        return Optional.of(new AggregationApplicationResult<>(
+                handle.withAggregations(termAggregations.build(), metricAggregations.build()),
+                projections.build(),
+                resultAssignments.build(),
+                ImmutableMap.of(),
+                false));
+    }
+
+    private static Optional<OpenSearchColumnHandle> aggregationOutputColumn(String name, Type type)
+    {
+        if (type.equals(BIGINT)) {
+            return Optional.of(syntheticColumn(name, type, "long", new BigintDecoder.Descriptor(name)));
+        }
+        if (type.equals(INTEGER)) {
+            return Optional.of(syntheticColumn(name, type, "integer", new IntegerDecoder.Descriptor(name)));
+        }
+        if (type.equals(SMALLINT)) {
+            return Optional.of(syntheticColumn(name, type, "short", new SmallintDecoder.Descriptor(name)));
+        }
+        if (type.equals(TINYINT)) {
+            return Optional.of(syntheticColumn(name, type, "byte", new TinyintDecoder.Descriptor(name)));
+        }
+        if (type.equals(DOUBLE)) {
+            return Optional.of(syntheticColumn(name, type, "double", new DoubleDecoder.Descriptor(name)));
+        }
+        if (type.equals(REAL)) {
+            return Optional.of(syntheticColumn(name, type, "float", new RealDecoder.Descriptor(name)));
+        }
+        return Optional.empty();
+    }
+
+    private static OpenSearchColumnHandle syntheticColumn(String name, Type type, String opensearchType, DecoderDescriptor decoderDescriptor)
+    {
+        // synthetic columns never support predicates
+        return new OpenSearchColumnHandle(ImmutableList.of(name), type, new PrimitiveType(opensearchType), decoderDescriptor, false);
+    }
+
+    @Override
     public Optional<ConstraintApplicationResult<ConnectorTableHandle>> applyFilter(ConnectorSession session, ConnectorTableHandle table, Constraint constraint)
     {
         OpenSearchTableHandle handle = (OpenSearchTableHandle) table;
 
         if (isPassthroughQuery(handle)) {
             // filter pushdown currently not supported for passthrough query
+            return Optional.empty();
+        }
+        if (handle.type() == AGGREGATION) {
+            // pushing a limit, sort or filter below an already pushed aggregation would change its meaning
             return Optional.empty();
         }
 

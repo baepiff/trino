@@ -20,13 +20,21 @@ import io.trino.plugin.opensearch.TopN.TopNSortItem;
 import io.trino.plugin.opensearch.client.IndexMetadata;
 import io.trino.plugin.opensearch.client.OpenSearchClient;
 import io.trino.plugin.opensearch.decoders.BigintDecoder;
+import io.trino.plugin.opensearch.decoders.DoubleDecoder;
+import io.trino.plugin.opensearch.decoders.IntegerDecoder;
 import io.trino.plugin.opensearch.decoders.VarcharDecoder;
+import io.trino.spi.connector.AggregateFunction;
+import io.trino.spi.connector.AggregationApplicationResult;
+import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableHandle;
+import io.trino.spi.connector.Constraint;
 import io.trino.spi.connector.LimitApplicationResult;
 import io.trino.spi.connector.SortItem;
 import io.trino.spi.connector.SortOrder;
 import io.trino.spi.connector.TopNApplicationResult;
+import io.trino.spi.expression.Variable;
+import io.trino.spi.predicate.TupleDomain;
 import io.trino.testing.TestingConnectorSession;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -41,6 +49,8 @@ import java.util.Optional;
 import static io.trino.plugin.opensearch.OpenSearchTableHandle.Type.QUERY;
 import static io.trino.plugin.opensearch.OpenSearchTableHandle.Type.SCAN;
 import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.DoubleType.DOUBLE;
+import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -176,6 +186,111 @@ public class TestOpenSearchMetadata
                 .isEmpty();
     }
 
+    @Test
+    public void testApplyGlobalCountStar()
+    {
+        AggregationApplicationResult<ConnectorTableHandle> result = metadata.applyAggregation(
+                        SESSION,
+                        scanHandle(),
+                        List.of(new AggregateFunction("count", BIGINT, List.of(), List.of(), false, Optional.empty())),
+                        Map.of(),
+                        List.of(List.of()))
+                .orElseThrow();
+
+        OpenSearchTableHandle handle = (OpenSearchTableHandle) result.getHandle();
+        assertThat(handle.type()).isEqualTo(OpenSearchTableHandle.Type.AGGREGATION);
+        assertThat(handle.termAggregations()).isEmpty();
+        assertThat(handle.metricAggregations()).containsExactly(new MetricAggregation("count", BIGINT, Optional.empty(), "_pushdown_0"));
+        assertThat(result.getProjections()).containsExactly(new Variable("_pushdown_0", BIGINT));
+        assertThat(result.getAssignments()).singleElement().satisfies(assignment -> {
+            assertThat(assignment.getVariable()).isEqualTo("_pushdown_0");
+            assertThat(assignment.getType()).isEqualTo(BIGINT);
+            OpenSearchColumnHandle column = (OpenSearchColumnHandle) assignment.getColumn();
+            assertThat(column.name()).isEqualTo("_pushdown_0");
+            assertThat(column.supportsPredicates()).isFalse();
+        });
+    }
+
+    @Test
+    public void testApplyGroupedSum()
+    {
+        OpenSearchColumnHandle value = integerColumn("value");
+        OpenSearchColumnHandle group = keywordColumn("kind");
+
+        AggregationApplicationResult<ConnectorTableHandle> result = metadata.applyAggregation(
+                        SESSION,
+                        scanHandle(),
+                        List.of(new AggregateFunction("sum", BIGINT, List.of(new Variable("value", INTEGER)), List.of(), false, Optional.empty())),
+                        Map.of("value", value),
+                        List.of(List.of(group)))
+                .orElseThrow();
+
+        OpenSearchTableHandle handle = (OpenSearchTableHandle) result.getHandle();
+        assertThat(handle.termAggregations()).containsExactly(new TermAggregation("kind", VARCHAR));
+        assertThat(handle.metricAggregations()).containsExactly(new MetricAggregation("sum", BIGINT, Optional.of(value), "_pushdown_0"));
+    }
+
+    @Test
+    public void testApplyAggregationOutputTypes()
+    {
+        OpenSearchColumnHandle value = integerColumn("value");
+        OpenSearchColumnHandle price = doubleColumn("price");
+
+        AggregationApplicationResult<ConnectorTableHandle> result = metadata.applyAggregation(
+                        SESSION,
+                        scanHandle(),
+                        List.of(
+                                new AggregateFunction("min", INTEGER, List.of(new Variable("value", INTEGER)), List.of(), false, Optional.empty()),
+                                new AggregateFunction("avg", DOUBLE, List.of(new Variable("value", INTEGER)), List.of(), false, Optional.empty()),
+                                new AggregateFunction("max", DOUBLE, List.of(new Variable("price", DOUBLE)), List.of(), false, Optional.empty())),
+                        Map.of("value", value, "price", price),
+                        List.of(List.of()))
+                .orElseThrow();
+
+        assertThat(result.getAssignments()).extracting(assignment -> assignment.getVariable() + ":" + assignment.getType())
+                .containsExactly("_pushdown_0:integer", "_pushdown_1:double", "_pushdown_2:double");
+    }
+
+    @Test
+    public void testApplyAggregationRejections()
+    {
+        OpenSearchColumnHandle value = integerColumn("value");
+        OpenSearchColumnHandle group = keywordColumn("kind");
+        AggregateFunction sum = new AggregateFunction("sum", BIGINT, List.of(new Variable("value", INTEGER)), List.of(), false, Optional.empty());
+        Map<String, ColumnHandle> assignments = Map.of("value", value);
+
+        // multiple grouping sets
+        assertThat(metadata.applyAggregation(SESSION, scanHandle(), List.of(sum), assignments, List.of(List.of(group), List.of()))).isEmpty();
+        // unsupported group-by column
+        assertThat(metadata.applyAggregation(SESSION, scanHandle(), List.of(sum), assignments, List.of(List.of(textColumn("description"))))).isEmpty();
+        // unsupported aggregate
+        assertThat(metadata.applyAggregation(
+                SESSION,
+                scanHandle(),
+                List.of(new AggregateFunction("sum", BIGINT, List.of(new Variable("regionkey", BIGINT)), List.of(), false, Optional.empty())),
+                Map.of("regionkey", bigintColumn("regionkey")),
+                List.of(List.of()))).isEmpty();
+        // already an aggregation
+        OpenSearchTableHandle aggregation = scanHandle().withAggregations(List.of(), List.of());
+        assertThat(metadata.applyAggregation(SESSION, aggregation, List.of(sum), assignments, List.of(List.of()))).isEmpty();
+        // existing TopN
+        assertThat(metadata.applyAggregation(SESSION, scanHandle().withTopN(TopN.fromLimit(5)), List.of(sum), assignments, List.of(List.of()))).isEmpty();
+        // passthrough query
+        assertThat(metadata.applyAggregation(SESSION, new OpenSearchTableHandle(QUERY, "default", "nation", Optional.of("{}")), List.of(sum), assignments, List.of(List.of()))).isEmpty();
+        // disabled by session property
+        assertThat(metadata.applyAggregation(session(false), scanHandle(), List.of(sum), assignments, List.of(List.of()))).isEmpty();
+    }
+
+    @Test
+    public void testLimitTopNAndFilterAreRejectedOverAggregation()
+    {
+        OpenSearchTableHandle aggregation = scanHandle().withAggregations(List.of(), List.of());
+
+        assertThat(metadata.applyLimit(SESSION, aggregation, 5)).isEmpty();
+        assertThat(metadata.applyTopN(SESSION, aggregation, 5, List.of(new SortItem("regionkey", SortOrder.ASC_NULLS_LAST)), Map.of("regionkey", bigintColumn("regionkey")))).isEmpty();
+        assertThat(metadata.applyFilter(SESSION, aggregation, new Constraint(TupleDomain.all()))).isEmpty();
+    }
+
     private static String likeToRegexp(String pattern, Optional<String> escapeChar)
     {
         return OpenSearchMetadata.likeToRegexp(Slices.utf8Slice(pattern), escapeChar.map(Slices::utf8Slice));
@@ -189,6 +304,16 @@ public class TestOpenSearchMetadata
     static OpenSearchColumnHandle bigintColumn(String name)
     {
         return new OpenSearchColumnHandle(List.of(name), BIGINT, new IndexMetadata.PrimitiveType("long"), new BigintDecoder.Descriptor(name), true);
+    }
+
+    static OpenSearchColumnHandle integerColumn(String name)
+    {
+        return new OpenSearchColumnHandle(List.of(name), INTEGER, new IndexMetadata.PrimitiveType("integer"), new IntegerDecoder.Descriptor(name), true);
+    }
+
+    static OpenSearchColumnHandle doubleColumn(String name)
+    {
+        return new OpenSearchColumnHandle(List.of(name), DOUBLE, new IndexMetadata.PrimitiveType("double"), new DoubleDecoder.Descriptor(name), true);
     }
 
     static OpenSearchColumnHandle keywordColumn(String name)
