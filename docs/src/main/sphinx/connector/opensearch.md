@@ -86,6 +86,15 @@ The following table details all general configuration properties:
 * - `opensearch.projection-pushdown-enabled`
   - Read only projected fields from row columns while performing `SELECT` queries
   - `true`
+* - `opensearch.aggregation-pushdown-enabled`
+  - Push down supported aggregations to OpenSearch. The catalog session property
+    `aggregation_pushdown_enabled` overrides this value for a session.
+  - `true`
+* - `opensearch.max-aggregation-buckets`
+  - Maximum number of buckets requested in each aggregation search request. The
+    connector pages through larger results. Must not exceed the cluster
+    setting `search.max_buckets`.
+  - `65535`
 :::
 
 ### Authentication
@@ -504,6 +513,43 @@ following data types:
 :::
 
 No other data types are supported for predicate push down.
+
+(opensearch-aggregation-pushdown)=
+### Aggregation push down
+
+The connector supports [aggregation push down](aggregation-pushdown) for these
+aggregate functions:
+
+* `count(*)` and `count(column)`
+* `min`, `max` on columns of type `TINYINT`, `SMALLINT`, `INTEGER`, `REAL`,
+  `DOUBLE`
+* `sum`, `avg` on columns of type `TINYINT`, `SMALLINT`, `INTEGER`, `DOUBLE`
+
+Aggregation push down is applied only when all of the following hold:
+
+* The query groups by none or by columns of type `VARCHAR` (`keyword`),
+  `TINYINT`, `SMALLINT`, `INTEGER`, `BIGINT`, or `BOOLEAN`, with a single
+  grouping set. `GROUPING SETS`, `CUBE` and `ROLLUP` are not pushed down.
+* The aggregate arguments are plain columns that support predicate push down.
+* The aggregates do not use `DISTINCT`, a `FILTER` clause, or an `ORDER BY`
+  clause.
+* The table is not accessed with the `raw_query` table function.
+
+`min`, `max`, `sum` and `avg` over `BIGINT` columns are not pushed down because
+OpenSearch computes metric aggregations with double precision, which cannot
+represent all `BIGINT` values. `sum` over integer columns is computed in double
+precision and is exact up to 2^53. `min` and `max` over `keyword` columns are
+not pushed down.
+
+Set `opensearch.aggregation-pushdown-enabled` to `false` to disable aggregation
+push down.
+
+(opensearch-topn-pushdown)=
+### TopN push down
+
+The connector supports [TopN push down](topn-pushdown) for queries with
+`ORDER BY ... LIMIT n`. It is applied when every sort column supports predicate
+push down. Each shard returns its sorted top `n` rows and Trino merges them.
 
 [built-in date formats]: https://opensearch.org/docs/latest/field-types/supported-field-types/date/#custom-formats
 [custom date formats]: https://opensearch.org/docs/latest/field-types/supported-field-types/date/#custom-formats
