@@ -16,6 +16,7 @@ package io.trino.plugin.opensearch;
 import com.google.common.collect.AbstractIterator;
 import com.google.common.collect.ImmutableList;
 import io.airlift.log.Logger;
+import io.trino.plugin.opensearch.TopN.TopNSortItem;
 import io.trino.plugin.opensearch.client.OpenSearchClient;
 import io.trino.plugin.opensearch.decoders.Decoder;
 import io.trino.spi.Page;
@@ -43,6 +44,7 @@ import java.util.function.Supplier;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.plugin.opensearch.BuiltinColumns.SOURCE;
 import static io.trino.plugin.opensearch.BuiltinColumns.isBuiltinColumn;
+import static io.trino.plugin.opensearch.TopN.TopNSortItem.SORT_BY_DOC;
 import static io.trino.spi.type.TimestampType.TIMESTAMP_MILLIS;
 import static java.util.Objects.requireNonNull;
 import static java.util.function.Predicate.isEqual;
@@ -99,13 +101,19 @@ public class ScanQueryPageSource
                 .filter(name -> !isBuiltinColumn(name))
                 .collect(toList());
 
-        // sorting by _doc (index order) get special treatment in OpenSearch and is more efficient
-        Optional<String> sort = Optional.of("_doc");
+        List<TopNSortItem> sortItems = table.topN()
+                .map(TopN::sortItems)
+                .orElse(ImmutableList.of());
+        if (sortItems.isEmpty() && table.query().isEmpty()) {
+            // sorting by _doc (index order) gets special treatment in OpenSearch and is more efficient.
+            // However, if we're using a custom OpenSearch query, use default sorting:
+            // documents will be scored and returned based on relevance
+            sortItems = ImmutableList.of(SORT_BY_DOC);
+        }
 
-        if (table.query().isPresent()) {
-            // However, if we're using a custom OpenSearch query, use default sorting.
-            // Documents will be scored and returned based on relevance
-            sort = Optional.empty();
+        OptionalLong limit = OptionalLong.empty();
+        if (table.topN().isPresent()) {
+            limit = OptionalLong.of(table.topN().orElseThrow().limit());
         }
 
         long start = System.nanoTime();
@@ -115,10 +123,10 @@ public class ScanQueryPageSource
                 OpenSearchQueryBuilder.buildSearchQuery(table.constraint().transformKeys(OpenSearchColumnHandle.class::cast), table.query(), table.regexes()),
                 needAllFields ? Optional.empty() : Optional.of(requiredFields),
                 documentFields,
-                sort,
-                table.limit());
+                sortItems,
+                limit);
         readTimeNanos += System.nanoTime() - start;
-        this.iterator = new SearchHitIterator(client, () -> searchResponse, table.limit());
+        this.iterator = new SearchHitIterator(client, () -> searchResponse, limit);
     }
 
     @Override

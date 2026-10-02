@@ -21,7 +21,6 @@ import io.trino.spi.predicate.TupleDomain;
 
 import java.util.Map;
 import java.util.Optional;
-import java.util.OptionalLong;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -34,7 +33,7 @@ public record OpenSearchTableHandle(
         TupleDomain<ColumnHandle> constraint,
         Map<String, String> regexes,
         Optional<String> query,
-        OptionalLong limit,
+        Optional<TopN> topN,
         Set<OpenSearchColumnHandle> columns)
         implements ConnectorTableHandle
 {
@@ -51,21 +50,18 @@ public record OpenSearchTableHandle(
                 TupleDomain.all(),
                 ImmutableMap.of(),
                 query,
-                OptionalLong.empty(),
+                Optional.empty(),
                 ImmutableSet.of());
     }
 
     public OpenSearchTableHandle withColumns(Set<OpenSearchColumnHandle> columns)
     {
-        return new OpenSearchTableHandle(
-                type,
-                schema,
-                index,
-                constraint,
-                regexes,
-                query,
-                limit,
-                columns);
+        return new OpenSearchTableHandle(type, schema, index, constraint, regexes, query, topN, columns);
+    }
+
+    public OpenSearchTableHandle withTopN(TopN topN)
+    {
+        return new OpenSearchTableHandle(type, schema, index, constraint, regexes, query, Optional.of(topN), columns);
     }
 
     public OpenSearchTableHandle
@@ -77,7 +73,7 @@ public record OpenSearchTableHandle(
         regexes = ImmutableMap.copyOf(requireNonNull(regexes, "regexes is null"));
         columns = ImmutableSet.copyOf(requireNonNull(columns, "columns is null"));
         requireNonNull(query, "query is null");
-        requireNonNull(limit, "limit is null");
+        requireNonNull(topN, "topN is null");
     }
 
     @Override
@@ -94,7 +90,7 @@ public record OpenSearchTableHandle(
                     .collect(Collectors.joining(", ")));
             attributes.append("]");
         }
-        limit.ifPresent(value -> attributes.append("limit=" + value));
+        topN.ifPresent(value -> attributes.append("topN=" + value));
         query.ifPresent(value -> attributes.append("query" + value));
 
         if (attributes.length() > 0) {

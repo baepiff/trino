@@ -30,6 +30,7 @@ import io.airlift.units.Duration;
 import io.trino.plugin.opensearch.AwsSecurityConfig;
 import io.trino.plugin.opensearch.OpenSearchConfig;
 import io.trino.plugin.opensearch.PasswordConfig;
+import io.trino.plugin.opensearch.TopN.TopNSortItem;
 import io.trino.spi.TrinoException;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
@@ -588,7 +589,7 @@ public class OpenSearchClient
         return body;
     }
 
-    public SearchResponse beginSearch(String index, int shard, QueryBuilder query, Optional<List<String>> fields, List<String> documentFields, Optional<String> sort, OptionalLong limit)
+    public SearchResponse beginSearch(String index, int shard, QueryBuilder query, Optional<List<String>> fields, List<String> documentFields, List<TopNSortItem> sortItems, OptionalLong limit)
     {
         SearchSourceBuilder sourceBuilder = SearchSourceBuilder.searchSource()
                 .query(query);
@@ -601,7 +602,7 @@ public class OpenSearchClient
             sourceBuilder.size(scrollSize);
         }
 
-        sort.ifPresent(sourceBuilder::sort);
+        sortItems.forEach(sortItem -> sourceBuilder.sort(sortItem.toSortBuilder()));
 
         fields.ifPresent(values -> {
             if (values.isEmpty()) {

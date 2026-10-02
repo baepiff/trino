@@ -13,15 +13,56 @@
  */
 package io.trino.plugin.opensearch;
 
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import io.airlift.slice.Slices;
+import io.trino.plugin.opensearch.TopN.TopNSortItem;
+import io.trino.plugin.opensearch.client.OpenSearchClient;
+import io.trino.spi.connector.ConnectorSession;
+import io.trino.spi.connector.ConnectorTableHandle;
+import io.trino.spi.connector.LimitApplicationResult;
+import io.trino.spi.connector.SortOrder;
+import io.trino.testing.TestingConnectorSession;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
 
+import java.io.IOException;
+import java.util.List;
 import java.util.Optional;
 
+import static io.trino.plugin.opensearch.OpenSearchTableHandle.Type.QUERY;
+import static io.trino.plugin.opensearch.OpenSearchTableHandle.Type.SCAN;
+import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
 
+@TestInstance(PER_CLASS)
 public class TestOpenSearchMetadata
 {
+    private static final ConnectorSession SESSION = session(true);
+
+    private OpenSearchClient client;
+    private OpenSearchMetadata metadata;
+
+    @BeforeAll
+    public void setUp()
+    {
+        OpenSearchConfig config = new OpenSearchConfig()
+                .setHosts(List.of("localhost"))
+                .setDefaultSchema("default");
+        client = new OpenSearchClient(config, Optional.empty(), Optional.empty());
+        metadata = new OpenSearchMetadata(TESTING_TYPE_MANAGER, client, config);
+    }
+
+    @AfterAll
+    public void tearDown()
+            throws IOException
+    {
+        client.close();
+    }
+
     @Test
     public void testLikeToRegexp()
     {
@@ -40,8 +81,53 @@ public class TestOpenSearchMetadata
         assertThat(likeToRegexp("Привет%", Optional.empty())).isEqualTo("Привет.*");
     }
 
+    @Test
+    public void testApplyLimitCreatesLimitOnlyTopN()
+    {
+        LimitApplicationResult<ConnectorTableHandle> result = metadata.applyLimit(SESSION, scanHandle(), 5).orElseThrow();
+
+        assertThat(((OpenSearchTableHandle) result.getHandle()).topN()).hasValue(TopN.fromLimit(5));
+    }
+
+    @Test
+    public void testApplyLimitKeepsSortItemsWhenNarrowing()
+    {
+        TopN existing = new TopN(10, ImmutableList.of(new TopNSortItem("regionkey", SortOrder.DESC_NULLS_FIRST)));
+
+        LimitApplicationResult<ConnectorTableHandle> result = metadata.applyLimit(SESSION, scanHandle().withTopN(existing), 5).orElseThrow();
+
+        assertThat(((OpenSearchTableHandle) result.getHandle()).topN())
+                .hasValue(new TopN(5, existing.sortItems()));
+    }
+
+    @Test
+    public void testApplyLimitDoesNotWidenExistingTopN()
+    {
+        assertThat(metadata.applyLimit(SESSION, scanHandle().withTopN(TopN.fromLimit(5)), 10)).isEmpty();
+        assertThat(metadata.applyLimit(SESSION, scanHandle().withTopN(TopN.fromLimit(5)), 5)).isEmpty();
+    }
+
+    @Test
+    public void testApplyLimitRejectsPassthroughQuery()
+    {
+        assertThat(metadata.applyLimit(SESSION, new OpenSearchTableHandle(QUERY, "default", "nation", Optional.of("{}")), 5)).isEmpty();
+    }
+
     private static String likeToRegexp(String pattern, Optional<String> escapeChar)
     {
         return OpenSearchMetadata.likeToRegexp(Slices.utf8Slice(pattern), escapeChar.map(Slices::utf8Slice));
+    }
+
+    static OpenSearchTableHandle scanHandle()
+    {
+        return new OpenSearchTableHandle(SCAN, "default", "nation", Optional.empty());
+    }
+
+    static ConnectorSession session(boolean aggregationPushdownEnabled)
+    {
+        return TestingConnectorSession.builder()
+                .setPropertyMetadata(new OpenSearchSessionProperties(new OpenSearchConfig()).getSessionProperties())
+                .setPropertyValues(ImmutableMap.of("aggregation_pushdown_enabled", aggregationPushdownEnabled))
+                .build();
     }
 }
