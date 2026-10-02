@@ -19,8 +19,10 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.net.HostAndPort;
 import io.trino.Session;
 import io.trino.spi.type.VarcharType;
+import io.trino.sql.planner.plan.AggregationNode;
 import io.trino.sql.planner.plan.ProjectNode;
 import io.trino.sql.planner.plan.TopNNode;
+import io.trino.sql.query.QueryAssertions;
 import io.trino.testing.AbstractTestQueries;
 import io.trino.testing.BaseConnectorTest;
 import io.trino.testing.MaterializedResult;
@@ -255,6 +257,190 @@ public abstract class BaseOpenSearchConnectorTest
     public void testTopNOverNonPushableSortColumn()
     {
         assertQueryOrdered("SELECT name, comment FROM nation ORDER BY comment, name LIMIT 5");
+    }
+
+    @Test
+    public void testCountPushdown()
+    {
+        assertThat(query("SELECT count(*) FROM nation"))
+                .matches("VALUES BIGINT '25'")
+                .isFullyPushedDown();
+        assertThat(query("SELECT count(*) FROM nation WHERE regionkey = 1"))
+                .matches("VALUES BIGINT '5'")
+                .isFullyPushedDown();
+        assertThat(query("SELECT regionkey, count(*), count(nationkey) FROM nation GROUP BY regionkey"))
+                .matches("VALUES (BIGINT '0', BIGINT '5', BIGINT '5'), (BIGINT '1', BIGINT '5', BIGINT '5'), (BIGINT '2', BIGINT '5', BIGINT '5'), (BIGINT '3', BIGINT '5', BIGINT '5'), (BIGINT '4', BIGINT '5', BIGINT '5')")
+                .isFullyPushedDown();
+        // HAVING is evaluated by Trino on top of the pushed aggregation
+        assertQuery(
+                "SELECT regionkey, count(*) FROM nation GROUP BY regionkey HAVING count(*) > 4 ORDER BY regionkey",
+                "VALUES (0, 5), (1, 5), (2, 5), (3, 5), (4, 5)");
+        // ORDER BY and LIMIT over an aggregation stay in Trino
+        assertQueryOrdered("SELECT regionkey, count(*) FROM nation GROUP BY regionkey ORDER BY regionkey LIMIT 2");
+    }
+
+    @Test
+    public void testBigintAggregatesAreNotPushedDown()
+    {
+        assertThat(query("SELECT sum(nationkey), min(nationkey), max(nationkey), avg(nationkey) FROM nation"))
+                .matches("VALUES (BIGINT '300', BIGINT '0', BIGINT '24', DOUBLE '12.0')")
+                .isNotFullyPushedDown(AggregationNode.class);
+        assertThat(query("SELECT regionkey, sum(nationkey) FROM nation GROUP BY regionkey"))
+                .isNotFullyPushedDown(AggregationNode.class);
+    }
+
+    @Test
+    public void testAggregationPushdownCanBeDisabledWithSessionProperty()
+    {
+        Session disabled = Session.builder(getSession())
+                .setCatalogSessionProperty(getSession().getCatalog().orElseThrow(), "aggregation_pushdown_enabled", "false")
+                .build();
+
+        assertThat(query(disabled, "SELECT regionkey, count(*) FROM nation GROUP BY regionkey"))
+                .isNotFullyPushedDown(AggregationNode.class);
+        assertThat(query("SELECT regionkey, count(*) FROM nation GROUP BY regionkey"))
+                .isFullyPushedDown();
+    }
+
+    @Test
+    public void testAggregationsOverNumericFields()
+            throws IOException
+    {
+        String tableName = "test_aggregation_numeric_" + randomNameSuffix();
+        @Language("JSON")
+        String properties =
+                """
+                {
+                    "properties": {
+                        "g": { "type": "keyword" },
+                        "i": { "type": "integer" },
+                        "d": { "type": "double" }
+                    }
+                }
+                """;
+
+        createIndex(tableName, properties);
+        try {
+            index(tableName, ImmutableMap.of("g", "a", "i", 1, "d", 1.5));
+            index(tableName, ImmutableMap.of("g", "a", "i", 3, "d", 2.5));
+            index(tableName, ImmutableMap.of("g", "b", "i", 10, "d", 0.5));
+
+            assertThat(query(format("SELECT g, count(*), count(i), sum(i), min(i), max(i), avg(i), sum(d), min(d), max(d) FROM %s GROUP BY g", tableName)))
+                    .matches("VALUES " +
+                            "(CAST('a' AS VARCHAR), BIGINT '2', BIGINT '2', BIGINT '4', INTEGER '1', INTEGER '3', DOUBLE '2.0', DOUBLE '4.0', DOUBLE '1.5', DOUBLE '2.5'), " +
+                            "(CAST('b' AS VARCHAR), BIGINT '1', BIGINT '1', BIGINT '10', INTEGER '10', INTEGER '10', DOUBLE '10.0', DOUBLE '0.5', DOUBLE '0.5', DOUBLE '0.5')")
+                    .isFullyPushedDown();
+
+            assertThat(query(format("SELECT count(*), sum(i), min(i), max(i), avg(i) FROM %s", tableName)))
+                    .matches("VALUES (BIGINT '3', BIGINT '14', INTEGER '1', INTEGER '10', DOUBLE '4.666666666666667')")
+                    .isFullyPushedDown();
+
+            // keyword min/max is not supported by OpenSearch metric aggregations and stays in Trino
+            assertThat(query(format("SELECT min(g), max(g) FROM %s", tableName)))
+                    .skippingTypesCheck()
+                    .matches("VALUES ('a', 'b')")
+                    .isNotFullyPushedDown(AggregationNode.class);
+        }
+        finally {
+            deleteIndex(tableName);
+        }
+    }
+
+    @Test
+    public void testAggregationsWithMissingKeysAndValues()
+            throws Exception
+    {
+        String tableName = "test_aggregation_missing_" + randomNameSuffix();
+        @Language("JSON")
+        String properties =
+                """
+                {
+                    "properties": {
+                        "g": { "type": "keyword" },
+                        "v": { "type": "integer" }
+                    }
+                }
+                """;
+
+        createIndex(tableName, properties);
+        try {
+            index(tableName, ImmutableMap.of("g", "a", "v", 10));
+            index(tableName, ImmutableMap.of("g", "a", "v", 20));
+            index(tableName, ImmutableMap.of("g", "b", "v", 5));
+            index(tableName, ImmutableMap.of("v", 7));
+            index(tableName, ImmutableMap.of("v", 8));
+            index(tableName, ImmutableMap.of("g", "c"));
+
+            @Language("SQL")
+            String groupedQuery = format("SELECT g, count(*), sum(v) FROM %s GROUP BY g", tableName);
+            String expected = "VALUES " +
+                    "(CAST(NULL AS VARCHAR), BIGINT '2', BIGINT '15'), " +
+                    "(CAST('a' AS VARCHAR), BIGINT '2', BIGINT '30'), " +
+                    "(CAST('b' AS VARCHAR), BIGINT '1', BIGINT '5'), " +
+                    "(CAST('c' AS VARCHAR), BIGINT '1', CAST(NULL AS BIGINT))";
+            assertThat(query(groupedQuery)).matches(expected).isFullyPushedDown();
+
+            // a group whose values are all missing
+            assertThat(query(format("SELECT count(*), count(v), sum(v), avg(v), min(v), max(v) FROM %s WHERE g = 'c'", tableName)))
+                    .matches("VALUES (BIGINT '1', BIGINT '0', CAST(NULL AS BIGINT), CAST(NULL AS DOUBLE), CAST(NULL AS INTEGER), CAST(NULL AS INTEGER))")
+                    .isFullyPushedDown();
+
+            // empty input
+            assertThat(query(format("SELECT count(*), count(v), sum(v), avg(v), min(v), max(v) FROM %s WHERE g = 'no_such_group'", tableName)))
+                    .matches("VALUES (BIGINT '0', BIGINT '0', CAST(NULL AS BIGINT), CAST(NULL AS DOUBLE), CAST(NULL AS INTEGER), CAST(NULL AS INTEGER))")
+                    .isFullyPushedDown();
+            assertThat(query(format("SELECT g, count(*) FROM %s WHERE g = 'no_such_group' GROUP BY g", tableName)))
+                    .returnsEmptyResult();
+
+            // two buckets per request force pagination, including a NULL group key in the after_key
+            try (QueryAssertions assertions = new QueryAssertions(createAdHocQueryRunner(Map.of("opensearch.max-aggregation-buckets", "2")))) {
+                assertThat(assertions.query(groupedQuery)).matches(expected).isFullyPushedDown();
+            }
+        }
+        finally {
+            deleteIndex(tableName);
+        }
+    }
+
+    @Test
+    public void testAggregationPaginationWithSmallPageSize()
+            throws Exception
+    {
+        try (QueryAssertions assertions = new QueryAssertions(createAdHocQueryRunner(Map.of("opensearch.max-aggregation-buckets", "2")))) {
+            assertThat(assertions.query("SELECT regionkey, nationkey, count(*) FROM nation GROUP BY regionkey, nationkey"))
+                    .matches("SELECT regionkey, nationkey, BIGINT '1' FROM nation")
+                    .isFullyPushedDown();
+        }
+    }
+
+    @Test
+    public void testAggregationOnBooleanGroupingColumn()
+            throws IOException
+    {
+        String tableName = "test_aggregation_boolean_" + randomNameSuffix();
+        @Language("JSON")
+        String properties =
+                """
+                {
+                    "properties": {
+                        "flag": { "type": "boolean" }
+                    }
+                }
+                """;
+
+        createIndex(tableName, properties);
+        try {
+            index(tableName, ImmutableMap.of("flag", true));
+            index(tableName, ImmutableMap.of("flag", true));
+            index(tableName, ImmutableMap.of("flag", false));
+
+            assertThat(query(format("SELECT flag, count(*) FROM %s GROUP BY flag", tableName)))
+                    .matches("VALUES (true, BIGINT '2'), (false, BIGINT '1')")
+                    .isFullyPushedDown();
+        }
+        finally {
+            deleteIndex(tableName);
+        }
     }
 
     @Test
@@ -2616,6 +2802,17 @@ public abstract class BaseOpenSearchConnectorTest
     protected String indexEndpoint(String index, String docId)
     {
         return format("/%s/_doc/%s", index, docId);
+    }
+
+    private QueryRunner createAdHocQueryRunner(Map<String, String> connectorProperties)
+            throws Exception
+    {
+        return OpenSearchQueryRunner.builder(opensearch.getAddress())
+                .addConnectorProperties(ImmutableMap.<String, String>builder()
+                        .put("jmx.base-name", randomNameSuffix())
+                        .putAll(connectorProperties)
+                        .buildOrThrow())
+                .build();
     }
 
     private void index(String index, Map<String, Object> document)
