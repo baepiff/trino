@@ -21,6 +21,7 @@ import io.airlift.log.Logger;
 import io.airlift.slice.Slice;
 import io.trino.plugin.base.expression.ConnectorExpressions;
 import io.trino.plugin.base.projection.ApplyProjectionUtil;
+import io.trino.plugin.opensearch.TopN.TopNSortItem;
 import io.trino.plugin.opensearch.client.IndexMetadata;
 import io.trino.plugin.opensearch.client.IndexMetadata.DateTimeType;
 import io.trino.plugin.opensearch.client.IndexMetadata.ObjectType;
@@ -58,8 +59,10 @@ import io.trino.spi.connector.LimitApplicationResult;
 import io.trino.spi.connector.ProjectionApplicationResult;
 import io.trino.spi.connector.SchemaTableName;
 import io.trino.spi.connector.SchemaTablePrefix;
+import io.trino.spi.connector.SortItem;
 import io.trino.spi.connector.TableColumnsMetadata;
 import io.trino.spi.connector.TableFunctionApplicationResult;
+import io.trino.spi.connector.TopNApplicationResult;
 import io.trino.spi.expression.Call;
 import io.trino.spi.expression.ConnectorExpression;
 import io.trino.spi.expression.Constant;
@@ -486,6 +489,38 @@ public class OpenSearchMetadata
                 .orElseGet(() -> TopN.fromLimit(limit));
 
         return Optional.of(new LimitApplicationResult<>(handle.withTopN(topN).withColumns(ImmutableSet.of()), false, false));
+    }
+
+    @Override
+    public Optional<TopNApplicationResult<ConnectorTableHandle>> applyTopN(
+            ConnectorSession session,
+            ConnectorTableHandle table,
+            long topNCount,
+            List<SortItem> sortItems,
+            Map<String, ColumnHandle> assignments)
+    {
+        OpenSearchTableHandle handle = (OpenSearchTableHandle) table;
+
+        if (isPassthroughQuery(handle)) {
+            // TopN pushdown currently not supported for passthrough query
+            return Optional.empty();
+        }
+        if (handle.topN().isPresent()) {
+            return Optional.empty();
+        }
+
+        ImmutableList.Builder<TopNSortItem> topNSortItems = ImmutableList.builder();
+        for (SortItem sortItem : sortItems) {
+            OpenSearchColumnHandle column = (OpenSearchColumnHandle) assignments.get(sortItem.getName());
+            verifyNotNull(column, "No assignment for %s", sortItem.getName());
+            if (!column.supportsPredicates()) {
+                return Optional.empty();
+            }
+            topNSortItems.add(new TopNSortItem(column.name(), sortItem.getSortOrder()));
+        }
+
+        // every shard returns its local top n and Trino merges them, so the TopN is not guaranteed
+        return Optional.of(new TopNApplicationResult<>(handle.withTopN(new TopN(topNCount, topNSortItems.build())), false, false));
     }
 
     @Override

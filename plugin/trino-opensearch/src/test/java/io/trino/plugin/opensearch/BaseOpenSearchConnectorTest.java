@@ -20,6 +20,7 @@ import com.google.common.net.HostAndPort;
 import io.trino.Session;
 import io.trino.spi.type.VarcharType;
 import io.trino.sql.planner.plan.ProjectNode;
+import io.trino.sql.planner.plan.TopNNode;
 import io.trino.testing.AbstractTestQueries;
 import io.trino.testing.BaseConnectorTest;
 import io.trino.testing.MaterializedResult;
@@ -194,6 +195,66 @@ public abstract class BaseOpenSearchConnectorTest
         assertExplain(
                 "EXPLAIN SELECT name FROM nation ORDER BY nationkey DESC NULLS LAST LIMIT 5",
                 "TopNPartial\\[count = 5, orderBy = \\[nationkey DESC");
+    }
+
+    @Test
+    public void testTopNWithMultipleSortColumnsAndMissingValues()
+            throws IOException
+    {
+        String tableName = "test_topn_sorting_" + randomNameSuffix();
+        @Language("JSON")
+        String properties =
+                """
+                {
+                    "properties": {
+                        "id": { "type": "keyword" },
+                        "sort_key": { "type": "long" },
+                        "tie_key": { "type": "long" }
+                    }
+                }
+                """;
+
+        createIndex(tableName, properties);
+        try {
+            index(tableName, ImmutableMap.of("id", "1", "sort_key", 2, "tie_key", 10));
+            index(tableName, ImmutableMap.of("id", "2", "tie_key", 90));
+            index(tableName, ImmutableMap.of("id", "3", "sort_key", 1, "tie_key", 10));
+            index(tableName, ImmutableMap.of("id", "4", "sort_key", 1, "tie_key", 20));
+
+            assertThat(query(format("SELECT id, sort_key, tie_key FROM %s ORDER BY sort_key ASC NULLS FIRST, tie_key DESC LIMIT 3", tableName)))
+                    .ordered()
+                    .matches("VALUES (CAST('2' AS VARCHAR), CAST(NULL AS BIGINT), BIGINT '90'), (CAST('4' AS VARCHAR), BIGINT '1', BIGINT '20'), (CAST('3' AS VARCHAR), BIGINT '1', BIGINT '10')")
+                    .isNotFullyPushedDown(TopNNode.class);
+            assertThat(query(format("SELECT id, sort_key, tie_key FROM %s ORDER BY sort_key DESC NULLS LAST, tie_key ASC LIMIT 3", tableName)))
+                    .ordered()
+                    .matches("VALUES (CAST('1' AS VARCHAR), BIGINT '2', BIGINT '10'), (CAST('3' AS VARCHAR), BIGINT '1', BIGINT '10'), (CAST('4' AS VARCHAR), BIGINT '1', BIGINT '20')")
+                    .isNotFullyPushedDown(TopNNode.class);
+            assertThat(query(format("SELECT id, sort_key, tie_key FROM %s ORDER BY sort_key ASC NULLS LAST, tie_key ASC LIMIT 2", tableName)))
+                    .ordered()
+                    .matches("VALUES (CAST('3' AS VARCHAR), BIGINT '1', BIGINT '10'), (CAST('4' AS VARCHAR), BIGINT '1', BIGINT '20')")
+                    .isNotFullyPushedDown(TopNNode.class);
+            assertThat(query(format("SELECT id, sort_key, tie_key FROM %s ORDER BY sort_key DESC NULLS FIRST, tie_key DESC LIMIT 2", tableName)))
+                    .ordered()
+                    .matches("VALUES (CAST('2' AS VARCHAR), CAST(NULL AS BIGINT), BIGINT '90'), (CAST('1' AS VARCHAR), BIGINT '2', BIGINT '10')")
+                    .isNotFullyPushedDown(TopNNode.class);
+        }
+        finally {
+            deleteIndex(tableName);
+        }
+    }
+
+    @Test
+    public void testTopNWithLimitAboveScrollSize()
+    {
+        // scroll size is 1000, so these limits require several scroll pages per shard
+        assertQueryOrdered("SELECT orderkey FROM orders ORDER BY orderkey DESC LIMIT 2500");
+        assertQueryOrdered("SELECT orderkey, custkey FROM orders ORDER BY custkey ASC, orderkey ASC LIMIT 1500");
+    }
+
+    @Test
+    public void testTopNOverNonPushableSortColumn()
+    {
+        assertQueryOrdered("SELECT name, comment FROM nation ORDER BY comment, name LIMIT 5");
     }
 
     @Test

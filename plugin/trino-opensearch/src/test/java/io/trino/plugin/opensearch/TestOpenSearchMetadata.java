@@ -17,11 +17,16 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.airlift.slice.Slices;
 import io.trino.plugin.opensearch.TopN.TopNSortItem;
+import io.trino.plugin.opensearch.client.IndexMetadata;
 import io.trino.plugin.opensearch.client.OpenSearchClient;
+import io.trino.plugin.opensearch.decoders.BigintDecoder;
+import io.trino.plugin.opensearch.decoders.VarcharDecoder;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.LimitApplicationResult;
+import io.trino.spi.connector.SortItem;
 import io.trino.spi.connector.SortOrder;
+import io.trino.spi.connector.TopNApplicationResult;
 import io.trino.testing.TestingConnectorSession;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -30,10 +35,13 @@ import org.junit.jupiter.api.TestInstance;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import static io.trino.plugin.opensearch.OpenSearchTableHandle.Type.QUERY;
 import static io.trino.plugin.opensearch.OpenSearchTableHandle.Type.SCAN;
+import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
@@ -113,6 +121,61 @@ public class TestOpenSearchMetadata
         assertThat(metadata.applyLimit(SESSION, new OpenSearchTableHandle(QUERY, "default", "nation", Optional.of("{}")), 5)).isEmpty();
     }
 
+    @Test
+    public void testApplyTopNCreatesSortItems()
+    {
+        TopNApplicationResult<ConnectorTableHandle> result = metadata.applyTopN(
+                        SESSION,
+                        scanHandle(),
+                        5,
+                        List.of(new SortItem("regionkey", SortOrder.DESC_NULLS_FIRST), new SortItem("name", SortOrder.ASC_NULLS_LAST)),
+                        Map.of("regionkey", bigintColumn("regionkey"), "name", keywordColumn("name")))
+                .orElseThrow();
+
+        assertThat(((OpenSearchTableHandle) result.getHandle()).topN()).hasValue(new TopN(
+                5,
+                List.of(
+                        new TopNSortItem("regionkey", SortOrder.DESC_NULLS_FIRST),
+                        new TopNSortItem("name", SortOrder.ASC_NULLS_LAST))));
+        assertThat(result.isTopNGuaranteed()).isFalse();
+    }
+
+    @Test
+    public void testApplyTopNRejectsUnsupportedSortColumn()
+    {
+        assertThat(metadata.applyTopN(
+                SESSION,
+                scanHandle(),
+                5,
+                List.of(new SortItem("description", SortOrder.ASC_NULLS_LAST)),
+                Map.of("description", textColumn("description"))))
+                .isEmpty();
+    }
+
+    @Test
+    public void testApplyTopNRejectsExistingTopN()
+    {
+        assertThat(metadata.applyTopN(
+                SESSION,
+                scanHandle().withTopN(TopN.fromLimit(10)),
+                5,
+                List.of(new SortItem("regionkey", SortOrder.ASC_NULLS_LAST)),
+                Map.of("regionkey", bigintColumn("regionkey"))))
+                .isEmpty();
+    }
+
+    @Test
+    public void testApplyTopNRejectsPassthroughQuery()
+    {
+        assertThat(metadata.applyTopN(
+                SESSION,
+                new OpenSearchTableHandle(QUERY, "default", "nation", Optional.of("{}")),
+                5,
+                List.of(new SortItem("regionkey", SortOrder.ASC_NULLS_LAST)),
+                Map.of("regionkey", bigintColumn("regionkey"))))
+                .isEmpty();
+    }
+
     private static String likeToRegexp(String pattern, Optional<String> escapeChar)
     {
         return OpenSearchMetadata.likeToRegexp(Slices.utf8Slice(pattern), escapeChar.map(Slices::utf8Slice));
@@ -121,6 +184,21 @@ public class TestOpenSearchMetadata
     static OpenSearchTableHandle scanHandle()
     {
         return new OpenSearchTableHandle(SCAN, "default", "nation", Optional.empty());
+    }
+
+    static OpenSearchColumnHandle bigintColumn(String name)
+    {
+        return new OpenSearchColumnHandle(List.of(name), BIGINT, new IndexMetadata.PrimitiveType("long"), new BigintDecoder.Descriptor(name), true);
+    }
+
+    static OpenSearchColumnHandle keywordColumn(String name)
+    {
+        return new OpenSearchColumnHandle(List.of(name), VARCHAR, new IndexMetadata.PrimitiveType("keyword"), new VarcharDecoder.Descriptor(name), true);
+    }
+
+    static OpenSearchColumnHandle textColumn(String name)
+    {
+        return new OpenSearchColumnHandle(List.of(name), VARCHAR, new IndexMetadata.PrimitiveType("text"), new VarcharDecoder.Descriptor(name), false);
     }
 
     static ConnectorSession session(boolean aggregationPushdownEnabled)
