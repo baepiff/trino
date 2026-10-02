@@ -60,6 +60,8 @@ public class OpenSearchConfig
     private boolean ignorePublishAddress;
     private boolean verifyHostnames = true;
     private boolean projectionPushDownEnabled = true;
+    private boolean aggregationPushdownEnabled = true;
+    private int maxAggregationBuckets = 65_535;
 
     private Security security;
 
@@ -337,6 +339,33 @@ public class OpenSearchConfig
     public OpenSearchConfig setProjectionPushdownEnabled(boolean projectionPushDownEnabled)
     {
         this.projectionPushDownEnabled = projectionPushDownEnabled;
+        return this;
+    }
+
+    public boolean isAggregationPushdownEnabled()
+    {
+        return aggregationPushdownEnabled;
+    }
+
+    @Config("opensearch.aggregation-pushdown-enabled")
+    @ConfigDescription("Push down supported aggregations to OpenSearch")
+    public OpenSearchConfig setAggregationPushdownEnabled(boolean aggregationPushdownEnabled)
+    {
+        this.aggregationPushdownEnabled = aggregationPushdownEnabled;
+        return this;
+    }
+
+    @Min(1)
+    public int getMaxAggregationBuckets()
+    {
+        return maxAggregationBuckets;
+    }
+
+    @Config("opensearch.max-aggregation-buckets")
+    @ConfigDescription("Maximum number of buckets requested in each aggregation search request")
+    public OpenSearchConfig setMaxAggregationBuckets(int maxAggregationBuckets)
+    {
+        this.maxAggregationBuckets = maxAggregationBuckets;
         return this;
     }
 
