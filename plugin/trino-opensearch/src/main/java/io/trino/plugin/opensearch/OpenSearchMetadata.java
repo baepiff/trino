@@ -91,7 +91,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Optional;
-import java.util.OptionalLong;
 import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
@@ -480,21 +479,15 @@ public class OpenSearchMetadata
             return Optional.empty();
         }
 
-        if (handle.limit().isPresent() && handle.limit().getAsLong() <= limit) {
+        if (handle.topN().isPresent() && handle.topN().orElseThrow().limit() <= limit) {
             return Optional.empty();
         }
 
-        handle = new OpenSearchTableHandle(
-                handle.type(),
-                handle.schema(),
-                handle.index(),
-                handle.constraint(),
-                handle.regexes(),
-                handle.query(),
-                OptionalLong.of(limit),
-                ImmutableSet.of());
+        TopN topN = handle.topN()
+                .map(existing -> new TopN(limit, existing.sortItems()))
+                .orElseGet(() -> TopN.fromLimit(limit));
 
-        return Optional.of(new LimitApplicationResult<>(handle, false, false));
+        return Optional.of(new LimitApplicationResult<>(handle.withTopN(topN).withColumns(ImmutableSet.of()), false, false));
     }
 
     @Override
@@ -568,7 +561,7 @@ public class OpenSearchMetadata
                 newDomain,
                 newRegexes,
                 handle.query(),
-                handle.limit(),
+                handle.topN(),
                 ImmutableSet.of());
 
         return Optional.of(new ConstraintApplicationResult<>(handle, TupleDomain.withColumnDomains(unsupported), newExpression, false));
