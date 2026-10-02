@@ -34,6 +34,7 @@ import io.trino.spi.connector.SortItem;
 import io.trino.spi.connector.SortOrder;
 import io.trino.spi.connector.TopNApplicationResult;
 import io.trino.spi.expression.Variable;
+import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.testing.TestingConnectorSession;
 import org.junit.jupiter.api.AfterAll;
@@ -282,18 +283,41 @@ public class TestOpenSearchMetadata
     }
 
     @Test
-    public void testLimitTopNAndFilterAreRejectedOverAggregation()
+    public void testApplyLimitRejectsAggregation()
     {
-        OpenSearchTableHandle aggregation = scanHandle().withAggregations(List.of(), List.of());
+        assertThat(metadata.applyLimit(SESSION, aggregationHandle(), 5)).isEmpty();
+    }
 
-        assertThat(metadata.applyLimit(SESSION, aggregation, 5)).isEmpty();
-        assertThat(metadata.applyTopN(SESSION, aggregation, 5, List.of(new SortItem("regionkey", SortOrder.ASC_NULLS_LAST)), Map.of("regionkey", bigintColumn("regionkey")))).isEmpty();
-        assertThat(metadata.applyFilter(SESSION, aggregation, new Constraint(TupleDomain.all()))).isEmpty();
+    @Test
+    public void testApplyTopNRejectsAggregation()
+    {
+        assertThat(metadata.applyTopN(
+                SESSION,
+                aggregationHandle(),
+                5,
+                List.of(new SortItem("regionkey", SortOrder.ASC_NULLS_LAST)),
+                Map.of("regionkey", bigintColumn("regionkey"))))
+                .isEmpty();
+    }
+
+    @Test
+    public void testApplyFilterRejectsAggregation()
+    {
+        Constraint constraint = new Constraint(TupleDomain.withColumnDomains(Map.of(bigintColumn("regionkey"), Domain.singleValue(BIGINT, 1L))));
+
+        // the same constraint is accepted for a scan, so the rejection is caused by the aggregation
+        assertThat(metadata.applyFilter(SESSION, scanHandle(), constraint)).isPresent();
+        assertThat(metadata.applyFilter(SESSION, aggregationHandle(), constraint)).isEmpty();
     }
 
     private static String likeToRegexp(String pattern, Optional<String> escapeChar)
     {
         return OpenSearchMetadata.likeToRegexp(Slices.utf8Slice(pattern), escapeChar.map(Slices::utf8Slice));
+    }
+
+    private static OpenSearchTableHandle aggregationHandle()
+    {
+        return scanHandle().withAggregations(List.of(), List.of());
     }
 
     static OpenSearchTableHandle scanHandle()
