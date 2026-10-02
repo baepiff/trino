@@ -13,12 +13,14 @@
  */
 package io.trino.plugin.opensearch;
 
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.predicate.TupleDomain;
 
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -34,12 +36,14 @@ public record OpenSearchTableHandle(
         Map<String, String> regexes,
         Optional<String> query,
         Optional<TopN> topN,
-        Set<OpenSearchColumnHandle> columns)
+        Set<OpenSearchColumnHandle> columns,
+        List<TermAggregation> termAggregations,
+        List<MetricAggregation> metricAggregations)
         implements ConnectorTableHandle
 {
     public enum Type
     {
-        SCAN, QUERY
+        SCAN, QUERY, AGGREGATION
     }
 
     public OpenSearchTableHandle(Type type, String schema, String index, Optional<String> query)
@@ -51,17 +55,24 @@ public record OpenSearchTableHandle(
                 ImmutableMap.of(),
                 query,
                 Optional.empty(),
-                ImmutableSet.of());
+                ImmutableSet.of(),
+                ImmutableList.of(),
+                ImmutableList.of());
     }
 
     public OpenSearchTableHandle withColumns(Set<OpenSearchColumnHandle> columns)
     {
-        return new OpenSearchTableHandle(type, schema, index, constraint, regexes, query, topN, columns);
+        return new OpenSearchTableHandle(type, schema, index, constraint, regexes, query, topN, columns, termAggregations, metricAggregations);
     }
 
     public OpenSearchTableHandle withTopN(TopN topN)
     {
-        return new OpenSearchTableHandle(type, schema, index, constraint, regexes, query, Optional.of(topN), columns);
+        return new OpenSearchTableHandle(type, schema, index, constraint, regexes, query, Optional.of(topN), columns, termAggregations, metricAggregations);
+    }
+
+    public OpenSearchTableHandle withAggregations(List<TermAggregation> termAggregations, List<MetricAggregation> metricAggregations)
+    {
+        return new OpenSearchTableHandle(Type.AGGREGATION, schema, index, constraint, regexes, query, topN, columns, termAggregations, metricAggregations);
     }
 
     public OpenSearchTableHandle
@@ -74,6 +85,8 @@ public record OpenSearchTableHandle(
         columns = ImmutableSet.copyOf(requireNonNull(columns, "columns is null"));
         requireNonNull(query, "query is null");
         requireNonNull(topN, "topN is null");
+        termAggregations = ImmutableList.copyOf(requireNonNull(termAggregations, "termAggregations is null"));
+        metricAggregations = ImmutableList.copyOf(requireNonNull(metricAggregations, "metricAggregations is null"));
     }
 
     @Override
@@ -92,6 +105,12 @@ public record OpenSearchTableHandle(
         }
         topN.ifPresent(value -> attributes.append("topN=" + value));
         query.ifPresent(value -> attributes.append("query" + value));
+        if (!termAggregations.isEmpty()) {
+            attributes.append("groupBy=" + termAggregations);
+        }
+        if (!metricAggregations.isEmpty()) {
+            attributes.append("aggregations=" + metricAggregations);
+        }
 
         if (attributes.length() > 0) {
             builder.append("(");
