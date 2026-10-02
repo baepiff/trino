@@ -27,6 +27,11 @@ import org.opensearch.index.query.QueryStringQueryBuilder;
 import org.opensearch.index.query.RangeQueryBuilder;
 import org.opensearch.index.query.RegexpQueryBuilder;
 import org.opensearch.index.query.TermQueryBuilder;
+import org.opensearch.search.aggregations.AggregationBuilder;
+import org.opensearch.search.aggregations.AggregationBuilders;
+import org.opensearch.search.aggregations.bucket.composite.CompositeAggregationBuilder;
+import org.opensearch.search.aggregations.bucket.composite.CompositeValuesSourceBuilder;
+import org.opensearch.search.aggregations.bucket.composite.TermsValuesSourceBuilder;
 
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -37,7 +42,13 @@ import java.util.Optional;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.Iterables.getOnlyElement;
+import static io.trino.plugin.opensearch.MetricAggregation.AVG;
+import static io.trino.plugin.opensearch.MetricAggregation.COUNT;
+import static io.trino.plugin.opensearch.MetricAggregation.MAX;
+import static io.trino.plugin.opensearch.MetricAggregation.MIN;
+import static io.trino.plugin.opensearch.MetricAggregation.SUM;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.DoubleType.DOUBLE;
@@ -54,7 +65,56 @@ import static java.time.format.DateTimeFormatter.ISO_DATE_TIME;
 
 public final class OpenSearchQueryBuilder
 {
+    public static final String COMPOSITE_AGGREGATION_NAME = "groupBy";
+
     private OpenSearchQueryBuilder() {}
+
+    public static List<AggregationBuilder> buildAggregationQuery(
+            List<TermAggregation> termAggregations,
+            List<MetricAggregation> metricAggregations,
+            int pageSize,
+            Optional<Map<String, Object>> after)
+    {
+        List<AggregationBuilder> metrics = metricAggregations.stream()
+                .flatMap(aggregation -> buildMetricAggregation(aggregation).stream())
+                .collect(toImmutableList());
+        if (termAggregations.isEmpty()) {
+            return metrics;
+        }
+
+        ImmutableList.Builder<CompositeValuesSourceBuilder<?>> sources = ImmutableList.builder();
+        for (TermAggregation termAggregation : termAggregations) {
+            // missingBucket keeps rows whose grouping column is NULL as their own group
+            sources.add(new TermsValuesSourceBuilder(termAggregation.term())
+                    .field(termAggregation.term())
+                    .missingBucket(true));
+        }
+        CompositeAggregationBuilder composite = new CompositeAggregationBuilder(COMPOSITE_AGGREGATION_NAME, sources.build())
+                .size(pageSize);
+        after.ifPresent(composite::aggregateAfter);
+        metrics.forEach(composite::subAggregation);
+        return ImmutableList.of(composite);
+    }
+
+    private static Optional<AggregationBuilder> buildMetricAggregation(MetricAggregation aggregation)
+    {
+        if (aggregation.columnHandle().isEmpty()) {
+            // count(*) is answered from the bucket doc_count or the total hits
+            return Optional.empty();
+        }
+        String field = aggregation.columnHandle().orElseThrow().name();
+        String alias = aggregation.alias();
+        AggregationBuilder builder = switch (aggregation.functionName()) {
+            case COUNT -> AggregationBuilders.count(alias).field(field);
+            case MIN -> AggregationBuilders.min(alias).field(field);
+            case MAX -> AggregationBuilders.max(alias).field(field);
+            // stats instead of sum: the sum aggregation returns 0 for an empty input where SQL requires NULL
+            case SUM -> AggregationBuilders.stats(alias).field(field);
+            case AVG -> AggregationBuilders.avg(alias).field(field);
+            default -> throw new IllegalArgumentException("Unsupported aggregation function: " + aggregation.functionName());
+        };
+        return Optional.of(builder);
+    }
 
     public static QueryBuilder buildSearchQuery(TupleDomain<OpenSearchColumnHandle> constraint, Optional<String> query, Map<String, String> regexes)
     {

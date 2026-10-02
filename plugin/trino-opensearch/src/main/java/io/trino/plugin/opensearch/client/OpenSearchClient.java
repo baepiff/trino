@@ -59,6 +59,7 @@ import org.opensearch.client.RestClient;
 import org.opensearch.client.RestClientBuilder;
 import org.opensearch.common.unit.TimeValue;
 import org.opensearch.index.query.QueryBuilder;
+import org.opensearch.search.aggregations.AggregationBuilder;
 import org.opensearch.search.builder.SearchSourceBuilder;
 import org.weakref.jmx.Managed;
 import org.weakref.jmx.Nested;
@@ -622,6 +623,29 @@ public class OpenSearchClient
                 .scroll(new TimeValue(scrollTimeout.toMillis()))
                 .source(sourceBuilder);
 
+        return search(request);
+    }
+
+    public SearchResponse beginAggregationSearch(String index, QueryBuilder query, List<AggregationBuilder> aggregations)
+    {
+        SearchSourceBuilder sourceBuilder = SearchSourceBuilder.searchSource()
+                .query(query)
+                .size(0)
+                // accurate total hits are required for count(*), the default stops counting at 10000
+                .trackTotalHits(true);
+        aggregations.forEach(sourceBuilder::aggregation);
+
+        LOG.debug("Begin aggregation search: %s, query: %s", index, sourceBuilder);
+
+        SearchRequest request = new SearchRequest(index)
+                .searchType(QUERY_THEN_FETCH)
+                .source(sourceBuilder);
+
+        return search(request);
+    }
+
+    private SearchResponse search(SearchRequest request)
+    {
         long start = System.nanoTime();
         try {
             return client.search(request);

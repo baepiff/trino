@@ -30,11 +30,18 @@ import org.opensearch.index.query.MatchAllQueryBuilder;
 import org.opensearch.index.query.QueryBuilder;
 import org.opensearch.index.query.RangeQueryBuilder;
 import org.opensearch.index.query.TermQueryBuilder;
+import org.opensearch.search.aggregations.AggregationBuilder;
+import org.opensearch.search.aggregations.AggregationBuilders;
+import org.opensearch.search.aggregations.bucket.composite.CompositeAggregationBuilder;
+import org.opensearch.search.aggregations.bucket.composite.TermsValuesSourceBuilder;
 
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
 import static io.airlift.slice.Slices.utf8Slice;
+import static io.trino.plugin.opensearch.OpenSearchQueryBuilder.buildAggregationQuery;
+import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.VarcharType.VARCHAR;
@@ -129,6 +136,61 @@ public class TestOpenSearchQueryBuilder
                 new BoolQueryBuilder()
                         .filter(new TermQueryBuilder(AGE.name(), 10L))
                         .mustNot(new ExistsQueryBuilder(SCORE.name())));
+    }
+
+    @Test
+    public void testGlobalAggregations()
+    {
+        List<AggregationBuilder> builders = buildAggregationQuery(
+                ImmutableList.of(),
+                ImmutableList.of(
+                        new MetricAggregation("count", BIGINT, Optional.empty(), "_pushdown_0"),
+                        new MetricAggregation("count", BIGINT, Optional.of(AGE), "_pushdown_1"),
+                        new MetricAggregation("sum", BIGINT, Optional.of(AGE), "_pushdown_2"),
+                        new MetricAggregation("avg", DOUBLE, Optional.of(AGE), "_pushdown_3"),
+                        new MetricAggregation("min", INTEGER, Optional.of(AGE), "_pushdown_4"),
+                        new MetricAggregation("max", DOUBLE, Optional.of(SCORE), "_pushdown_5")),
+                100,
+                Optional.empty());
+
+        // count(*) needs no aggregation, sum is computed with stats so an empty input can be reported as NULL
+        assertThat(builders).containsExactly(
+                AggregationBuilders.count("_pushdown_1").field("age"),
+                AggregationBuilders.stats("_pushdown_2").field("age"),
+                AggregationBuilders.avg("_pushdown_3").field("age"),
+                AggregationBuilders.min("_pushdown_4").field("age"),
+                AggregationBuilders.max("_pushdown_5").field("score"));
+    }
+
+    @Test
+    public void testCountStarOnlyBuildsNoAggregations()
+    {
+        assertThat(buildAggregationQuery(
+                ImmutableList.of(),
+                ImmutableList.of(new MetricAggregation("count", BIGINT, Optional.empty(), "_pushdown_0")),
+                100,
+                Optional.empty()))
+                .isEmpty();
+    }
+
+    @Test
+    public void testGroupedAggregations()
+    {
+        List<AggregationBuilder> builders = buildAggregationQuery(
+                ImmutableList.of(new TermAggregation("name", VARCHAR), new TermAggregation("age", INTEGER)),
+                ImmutableList.of(new MetricAggregation("max", DOUBLE, Optional.of(SCORE), "_pushdown_0")),
+                50,
+                Optional.of(ImmutableMap.of("name", "alice", "age", 30)));
+
+        assertThat(builders).containsExactly(
+                new CompositeAggregationBuilder(
+                        "groupBy",
+                        ImmutableList.of(
+                                new TermsValuesSourceBuilder("name").field("name").missingBucket(true),
+                                new TermsValuesSourceBuilder("age").field("age").missingBucket(true)))
+                        .size(50)
+                        .aggregateAfter(ImmutableMap.of("name", "alice", "age", 30))
+                        .subAggregation(AggregationBuilders.max("_pushdown_0").field("score")));
     }
 
     private static void assertQueryBuilder(Map<OpenSearchColumnHandle, Domain> domains, QueryBuilder expected)
