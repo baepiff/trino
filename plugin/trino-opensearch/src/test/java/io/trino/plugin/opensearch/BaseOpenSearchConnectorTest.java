@@ -325,15 +325,26 @@ public abstract class BaseOpenSearchConnectorTest
             index(tableName, ImmutableMap.of("g", "a", "i", 3, "d", 2.5));
             index(tableName, ImmutableMap.of("g", "b", "i", 10, "d", 0.5));
 
-            assertThat(query(format("SELECT g, count(*), count(i), sum(i), min(i), max(i), avg(i), sum(d), min(d), max(d) FROM %s GROUP BY g", tableName)))
+            assertThat(query(format("SELECT g, count(*), count(i), min(i), max(i), sum(d), min(d), max(d) FROM %s GROUP BY g", tableName)))
                     .matches("VALUES " +
-                            "(CAST('a' AS VARCHAR), BIGINT '2', BIGINT '2', BIGINT '4', INTEGER '1', INTEGER '3', DOUBLE '2.0', DOUBLE '4.0', DOUBLE '1.5', DOUBLE '2.5'), " +
-                            "(CAST('b' AS VARCHAR), BIGINT '1', BIGINT '1', BIGINT '10', INTEGER '10', INTEGER '10', DOUBLE '10.0', DOUBLE '0.5', DOUBLE '0.5', DOUBLE '0.5')")
+                            "(CAST('a' AS VARCHAR), BIGINT '2', BIGINT '2', INTEGER '1', INTEGER '3', DOUBLE '4.0', DOUBLE '1.5', DOUBLE '2.5'), " +
+                            "(CAST('b' AS VARCHAR), BIGINT '1', BIGINT '1', INTEGER '10', INTEGER '10', DOUBLE '0.5', DOUBLE '0.5', DOUBLE '0.5')")
                     .isFullyPushedDown();
 
-            assertThat(query(format("SELECT count(*), sum(i), min(i), max(i), avg(i) FROM %s", tableName)))
-                    .matches("VALUES (BIGINT '3', BIGINT '14', INTEGER '1', INTEGER '10', DOUBLE '4.666666666666667')")
+            assertThat(query(format("SELECT count(*), min(i), max(i), sum(d), avg(d) FROM %s", tableName)))
+                    .matches("VALUES (BIGINT '3', INTEGER '1', INTEGER '10', DOUBLE '4.5', DOUBLE '1.5')")
                     .isFullyPushedDown();
+
+            // Trino plans sum and avg of an INTEGER column over a CAST to BIGINT, and the cast between the scan and the
+            // aggregation prevents the push down, so these aggregates stay in Trino
+            assertThat(query(format("SELECT g, sum(i), avg(i) FROM %s GROUP BY g", tableName)))
+                    .matches("VALUES " +
+                            "(CAST('a' AS VARCHAR), BIGINT '4', DOUBLE '2.0'), " +
+                            "(CAST('b' AS VARCHAR), BIGINT '10', DOUBLE '10.0')")
+                    .isNotFullyPushedDown(AggregationNode.class, ProjectNode.class);
+            assertThat(query(format("SELECT sum(i), avg(i) FROM %s", tableName)))
+                    .matches("VALUES (BIGINT '14', DOUBLE '4.666666666666667')")
+                    .isNotFullyPushedDown(AggregationNode.class, ProjectNode.class);
 
             // keyword min/max is not supported by OpenSearch metric aggregations and stays in Trino
             assertThat(query(format("SELECT min(g), max(g) FROM %s", tableName)))
@@ -372,23 +383,36 @@ public abstract class BaseOpenSearchConnectorTest
             index(tableName, ImmutableMap.of("g", "c"));
 
             @Language("SQL")
-            String groupedQuery = format("SELECT g, count(*), sum(v) FROM %s GROUP BY g", tableName);
+            String groupedQuery = format("SELECT g, count(*), count(v), min(v), max(v) FROM %s GROUP BY g", tableName);
             String expected = "VALUES " +
-                    "(CAST(NULL AS VARCHAR), BIGINT '2', BIGINT '15'), " +
-                    "(CAST('a' AS VARCHAR), BIGINT '2', BIGINT '30'), " +
-                    "(CAST('b' AS VARCHAR), BIGINT '1', BIGINT '5'), " +
-                    "(CAST('c' AS VARCHAR), BIGINT '1', CAST(NULL AS BIGINT))";
+                    "(CAST(NULL AS VARCHAR), BIGINT '2', BIGINT '2', INTEGER '7', INTEGER '8'), " +
+                    "(CAST('a' AS VARCHAR), BIGINT '2', BIGINT '2', INTEGER '10', INTEGER '20'), " +
+                    "(CAST('b' AS VARCHAR), BIGINT '1', BIGINT '1', INTEGER '5', INTEGER '5'), " +
+                    "(CAST('c' AS VARCHAR), BIGINT '1', BIGINT '0', CAST(NULL AS INTEGER), CAST(NULL AS INTEGER))";
             assertThat(query(groupedQuery)).matches(expected).isFullyPushedDown();
 
             // a group whose values are all missing
-            assertThat(query(format("SELECT count(*), count(v), sum(v), avg(v), min(v), max(v) FROM %s WHERE g = 'c'", tableName)))
-                    .matches("VALUES (BIGINT '1', BIGINT '0', CAST(NULL AS BIGINT), CAST(NULL AS DOUBLE), CAST(NULL AS INTEGER), CAST(NULL AS INTEGER))")
+            assertThat(query(format("SELECT count(*), count(v), min(v), max(v) FROM %s WHERE g = 'c'", tableName)))
+                    .matches("VALUES (BIGINT '1', BIGINT '0', CAST(NULL AS INTEGER), CAST(NULL AS INTEGER))")
                     .isFullyPushedDown();
 
             // empty input
-            assertThat(query(format("SELECT count(*), count(v), sum(v), avg(v), min(v), max(v) FROM %s WHERE g = 'no_such_group'", tableName)))
-                    .matches("VALUES (BIGINT '0', BIGINT '0', CAST(NULL AS BIGINT), CAST(NULL AS DOUBLE), CAST(NULL AS INTEGER), CAST(NULL AS INTEGER))")
+            assertThat(query(format("SELECT count(*), count(v), min(v), max(v) FROM %s WHERE g = 'no_such_group'", tableName)))
+                    .matches("VALUES (BIGINT '0', BIGINT '0', CAST(NULL AS INTEGER), CAST(NULL AS INTEGER))")
                     .isFullyPushedDown();
+
+            // sum and avg of an INTEGER column stay in Trino because Trino plans them over a CAST to BIGINT, which prevents
+            // the push down. Trino computes the NULL results of the all-missing case itself.
+            assertThat(query(format("SELECT sum(v), avg(v) FROM %s WHERE g = 'c'", tableName)))
+                    .matches("VALUES (CAST(NULL AS BIGINT), CAST(NULL AS DOUBLE))")
+                    .isNotFullyPushedDown(AggregationNode.class, ProjectNode.class);
+            assertThat(query(format("SELECT g, sum(v) FROM %s GROUP BY g", tableName)))
+                    .matches("VALUES " +
+                            "(CAST(NULL AS VARCHAR), BIGINT '15'), " +
+                            "(CAST('a' AS VARCHAR), BIGINT '30'), " +
+                            "(CAST('b' AS VARCHAR), BIGINT '5'), " +
+                            "(CAST('c' AS VARCHAR), CAST(NULL AS BIGINT))")
+                    .isNotFullyPushedDown(AggregationNode.class, ProjectNode.class);
             assertThat(query(format("SELECT g, count(*) FROM %s WHERE g = 'no_such_group' GROUP BY g", tableName)))
                     .returnsEmptyResult();
 
