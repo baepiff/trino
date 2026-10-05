@@ -523,7 +523,7 @@ aggregate functions:
 * `count(*)` and `count(column)`
 * `min`, `max` on columns of type `TINYINT`, `SMALLINT`, `INTEGER`, `REAL`,
   `DOUBLE`
-* `sum`, `avg` on columns of type `TINYINT`, `SMALLINT`, `INTEGER`, `DOUBLE`
+* `sum`, `avg` on columns of type `DOUBLE`
 
 Aggregation push down is applied only when all of the following hold:
 
@@ -541,9 +541,10 @@ Aggregation push down is applied only when all of the following hold:
 
 `min`, `max`, `sum` and `avg` over `BIGINT` columns are not pushed down because
 OpenSearch computes metric aggregations with double precision, which cannot
-represent all `BIGINT` values. `sum` over integer columns is computed in double
-precision and is exact up to 2^53. Larger sums can lose precision, and a sum
-outside the `BIGINT` range is clamped instead of failing. `min` and `max` over
+represent all `BIGINT` values. `sum` and `avg` over `TINYINT`, `SMALLINT` and
+`INTEGER` columns are not pushed down either: Trino evaluates them over a cast
+of the column to `BIGINT`, and a cast between the table scan and the aggregation
+prevents the push down, so these aggregates stay in Trino. `min` and `max` over
 `keyword` columns are not pushed down.
 
 Pushed-down aggregation, sorting and grouping use the OpenSearch doc values of
