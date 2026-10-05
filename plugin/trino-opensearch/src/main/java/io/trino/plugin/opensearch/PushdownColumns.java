@@ -17,7 +17,7 @@ import io.trino.plugin.opensearch.decoders.RawJsonDecoder;
 
 import static io.trino.plugin.opensearch.BuiltinColumns.isBuiltinColumn;
 
-final class PushdownColumns
+public final class PushdownColumns
 {
     private PushdownColumns() {}
 
@@ -28,7 +28,7 @@ final class PushdownColumns
      * excluded because their Trino value is the JSON text of the whole field (possibly an array), while
      * OpenSearch operates on the individual values of the field.
      */
-    static boolean isDocValuesPushdownSupported(OpenSearchColumnHandle column)
+    public static boolean isDocValuesPushdownSupported(OpenSearchColumnHandle column)
     {
         return column.supportsPredicates()
                 && !isBuiltinColumn(column.name())

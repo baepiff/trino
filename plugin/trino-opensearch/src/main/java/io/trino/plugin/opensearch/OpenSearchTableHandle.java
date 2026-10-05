@@ -43,7 +43,7 @@ public record OpenSearchTableHandle(
 {
     public enum Type
     {
-        SCAN, QUERY, AGGREGATION
+        SCAN, QUERY, AGGREGATION, SQL_AGGREGATION
     }
 
     public OpenSearchTableHandle(Type type, String schema, String index, Optional<String> query)
@@ -73,6 +73,11 @@ public record OpenSearchTableHandle(
     public OpenSearchTableHandle withAggregations(List<TermAggregation> termAggregations, List<MetricAggregation> metricAggregations)
     {
         return new OpenSearchTableHandle(Type.AGGREGATION, schema, index, constraint, regexes, query, topN, columns, termAggregations, metricAggregations);
+    }
+
+    public OpenSearchTableHandle withSqlAggregations(List<MetricAggregation> metricAggregations)
+    {
+        return new OpenSearchTableHandle(Type.SQL_AGGREGATION, schema, index, constraint, regexes, query, topN, columns, ImmutableList.of(), metricAggregations);
     }
 
     public OpenSearchTableHandle

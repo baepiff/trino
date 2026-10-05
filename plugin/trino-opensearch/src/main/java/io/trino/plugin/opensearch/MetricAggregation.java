@@ -39,7 +39,17 @@ public record MetricAggregation(String functionName, Type outputType, Optional<O
     public static final String SUM = "sum";
     public static final String AVG = "avg";
 
-    private static final Set<String> SUPPORTED_FUNCTIONS = ImmutableSet.of(COUNT, MIN, MAX, SUM, AVG);
+    public static final String STDDEV_SAMP = "stddev_samp";
+    public static final String STDDEV_POP = "stddev_pop";
+    public static final String VAR_SAMP = "var_samp";
+    public static final String VAR_POP = "var_pop";
+
+    public static final Set<String> STATISTICAL_FUNCTIONS = ImmutableSet.of(STDDEV_SAMP, STDDEV_POP, VAR_SAMP, VAR_POP);
+    public static final Set<String> DEFAULT_FUNCTIONS = ImmutableSet.of(COUNT, MIN, MAX, SUM, AVG);
+    public static final Set<String> SQL_FUNCTIONS = ImmutableSet.<String>builder()
+            .addAll(DEFAULT_FUNCTIONS)
+            .addAll(STATISTICAL_FUNCTIONS)
+            .build();
 
     public MetricAggregation
     {
@@ -51,12 +61,17 @@ public record MetricAggregation(String functionName, Type outputType, Optional<O
 
     public static Optional<MetricAggregation> from(AggregateFunction function, Map<String, ColumnHandle> assignments, String alias)
     {
+        return from(function, assignments, alias, DEFAULT_FUNCTIONS);
+    }
+
+    public static Optional<MetricAggregation> from(AggregateFunction function, Map<String, ColumnHandle> assignments, String alias, Set<String> allowedFunctions)
+    {
         if (function.isDistinct() || function.getFilter().isPresent() || !function.getSortItems().isEmpty()) {
             return Optional.empty();
         }
 
-        String functionName = function.getFunctionName();
-        if (!SUPPORTED_FUNCTIONS.contains(functionName)) {
+        String functionName = canonicalFunctionName(function.getFunctionName());
+        if (!allowedFunctions.contains(functionName)) {
             return Optional.empty();
         }
 
@@ -75,6 +90,15 @@ public record MetricAggregation(String functionName, Type outputType, Optional<O
         return Optional.of(new MetricAggregation(functionName, function.getOutputType(), Optional.of(column), alias));
     }
 
+    public static String canonicalFunctionName(String functionName)
+    {
+        return switch (functionName) {
+            case "stddev" -> STDDEV_SAMP;
+            case "variance" -> VAR_SAMP;
+            default -> functionName;
+        };
+    }
+
     private static boolean isSupportedInput(String functionName, Type inputType)
     {
         return switch (functionName) {
@@ -83,7 +107,7 @@ public record MetricAggregation(String functionName, Type outputType, Optional<O
             // BIGINT is excluded: metric aggregations return doubles, so values above 2^53 lose precision
             case MIN, MAX -> inputType.equals(TINYINT) || inputType.equals(SMALLINT) || inputType.equals(INTEGER) || inputType.equals(REAL) || inputType.equals(DOUBLE);
             // REAL is excluded: OpenSearch accumulates in double while Trino accumulates in single precision
-            case SUM, AVG -> inputType.equals(TINYINT) || inputType.equals(SMALLINT) || inputType.equals(INTEGER) || inputType.equals(DOUBLE);
+            case SUM, AVG, STDDEV_SAMP, STDDEV_POP, VAR_SAMP, VAR_POP -> inputType.equals(TINYINT) || inputType.equals(SMALLINT) || inputType.equals(INTEGER) || inputType.equals(DOUBLE);
             default -> false;
         };
     }

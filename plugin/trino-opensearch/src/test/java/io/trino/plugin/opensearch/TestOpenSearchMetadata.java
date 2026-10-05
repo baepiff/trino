@@ -370,6 +370,23 @@ public class TestOpenSearchMetadata
         return OpenSearchMetadata.likeToRegexp(Slices.utf8Slice(pattern), escapeChar.map(Slices::utf8Slice));
     }
 
+    @Test
+    public void testSqlAggregationHandleRejectsLimitTopNFilterAndAggregation()
+    {
+        OpenSearchTableHandle sqlAggregation = scanHandle().withSqlAggregations(List.of());
+
+        assertThat(sqlAggregation.type()).isEqualTo(OpenSearchTableHandle.Type.SQL_AGGREGATION);
+        assertThat(metadata.applyLimit(SESSION, sqlAggregation, 5)).isEmpty();
+        assertThat(metadata.applyTopN(SESSION, sqlAggregation, 5, List.of(new SortItem("regionkey", SortOrder.ASC_NULLS_LAST)), Map.of("regionkey", bigintColumn("regionkey")))).isEmpty();
+        assertThat(metadata.applyFilter(SESSION, sqlAggregation, new Constraint(TupleDomain.withColumnDomains(Map.of(bigintColumn("regionkey"), Domain.singleValue(BIGINT, 1L)))))).isEmpty();
+        assertThat(metadata.applyAggregation(
+                SESSION,
+                sqlAggregation,
+                List.of(new AggregateFunction("count", BIGINT, List.of(), List.of(), false, Optional.empty())),
+                Map.of(),
+                List.of(List.of()))).isEmpty();
+    }
+
     private static OpenSearchTableHandle aggregationHandle()
     {
         return scanHandle().withAggregations(List.of(), List.of());

@@ -126,6 +126,37 @@ public class TestAggregationModel
     }
 
     @Test
+    public void testStatisticalFunctionsOnlyThroughSqlFunctionSet()
+    {
+        OpenSearchColumnHandle doubleColumn = column("d", DOUBLE, "double", true);
+        OpenSearchColumnHandle integer = column("i", INTEGER, "integer", true);
+        Map<String, ColumnHandle> assignments = Map.of("d", doubleColumn, "i", integer);
+
+        for (String name : List.of("stddev", "stddev_samp", "stddev_pop", "variance", "var_samp", "var_pop")) {
+            AggregateFunction function = function(name, DOUBLE, "d", DOUBLE);
+            assertThat(MetricAggregation.from(function, assignments, "a")).as(name + " default set").isEmpty();
+            assertThat(MetricAggregation.from(function, assignments, "a", MetricAggregation.SQL_FUNCTIONS)).as(name + " sql set").isPresent();
+        }
+        assertThat(MetricAggregation.from(function("stddev", DOUBLE, "d", DOUBLE), assignments, "a", MetricAggregation.SQL_FUNCTIONS).orElseThrow().functionName())
+                .isEqualTo("stddev_samp");
+        assertThat(MetricAggregation.from(function("variance", DOUBLE, "d", DOUBLE), assignments, "a", MetricAggregation.SQL_FUNCTIONS).orElseThrow().functionName())
+                .isEqualTo("var_samp");
+        assertThat(MetricAggregation.from(function("var_pop", DOUBLE, "i", INTEGER), assignments, "a", MetricAggregation.SQL_FUNCTIONS)).isPresent();
+        assertThat(MetricAggregation.canonicalFunctionName("sum")).isEqualTo("sum");
+    }
+
+    @Test
+    public void testStatisticalFunctionsRejectBigintAndReal()
+    {
+        Map<String, ColumnHandle> assignments = Map.of(
+                "b", bigintColumn("b"),
+                "r", column("r", REAL, "float", true));
+
+        assertThat(MetricAggregation.from(function("var_pop", DOUBLE, "b", BIGINT), assignments, "a", MetricAggregation.SQL_FUNCTIONS)).isEmpty();
+        assertThat(MetricAggregation.from(function("var_pop", DOUBLE, "r", REAL), assignments, "a", MetricAggregation.SQL_FUNCTIONS)).isEmpty();
+    }
+
+    @Test
     public void testRejectsUnsupportedShapes()
     {
         Map<String, ColumnHandle> assignments = Map.of("i", column("i", INTEGER, "integer", true));

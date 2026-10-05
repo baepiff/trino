@@ -117,6 +117,7 @@ import static io.trino.plugin.opensearch.OpenSearchErrorCode.OPENSEARCH_INVALID_
 import static io.trino.plugin.opensearch.OpenSearchSessionProperties.isAggregationPushdownEnabled;
 import static io.trino.plugin.opensearch.OpenSearchSessionProperties.isProjectionPushdownEnabled;
 import static io.trino.plugin.opensearch.OpenSearchTableHandle.Type.AGGREGATION;
+import static io.trino.plugin.opensearch.OpenSearchTableHandle.Type.SQL_AGGREGATION;
 import static io.trino.plugin.opensearch.PushdownColumns.isDocValuesPushdownSupported;
 import static io.trino.spi.StandardErrorCode.INVALID_FUNCTION_ARGUMENT;
 import static io.trino.spi.StandardErrorCode.NOT_SUPPORTED;
@@ -142,7 +143,7 @@ public class OpenSearchMetadata
 {
     private static final Logger log = Logger.get(OpenSearchMetadata.class);
 
-    private static final String SYNTHETIC_COLUMN_NAME_PREFIX = "_pushdown_";
+    protected static final String SYNTHETIC_COLUMN_NAME_PREFIX = "_pushdown_";
     private static final String PASSTHROUGH_QUERY_RESULT_COLUMN_NAME = "result";
     private static final ColumnMetadata PASSTHROUGH_QUERY_RESULT_COLUMN_METADATA = ColumnMetadata.builder()
             .setName(PASSTHROUGH_QUERY_RESULT_COLUMN_NAME)
@@ -486,7 +487,7 @@ public class OpenSearchMetadata
             // limit pushdown currently not supported passthrough query
             return Optional.empty();
         }
-        if (handle.type() == AGGREGATION) {
+        if (isAggregation(handle)) {
             // pushing a limit, sort or filter below an already pushed aggregation would change its meaning
             return Optional.empty();
         }
@@ -516,7 +517,7 @@ public class OpenSearchMetadata
             // TopN pushdown currently not supported for passthrough query
             return Optional.empty();
         }
-        if (handle.type() == AGGREGATION) {
+        if (isAggregation(handle)) {
             // pushing a limit, sort or filter below an already pushed aggregation would change its meaning
             return Optional.empty();
         }
@@ -563,7 +564,7 @@ public class OpenSearchMetadata
         }
 
         OpenSearchTableHandle handle = (OpenSearchTableHandle) table;
-        if (isPassthroughQuery(handle) || handle.type() == AGGREGATION || handle.topN().isPresent()) {
+        if (isPassthroughQuery(handle) || isAggregation(handle) || handle.topN().isPresent()) {
             return Optional.empty();
         }
 
@@ -608,7 +609,7 @@ public class OpenSearchMetadata
                 false));
     }
 
-    private static Optional<OpenSearchColumnHandle> aggregationOutputColumn(String name, Type type)
+    protected static Optional<OpenSearchColumnHandle> aggregationOutputColumn(String name, Type type)
     {
         if (type.equals(BIGINT)) {
             return Optional.of(syntheticColumn(name, type, "long", new BigintDecoder.Descriptor(name)));
@@ -646,7 +647,7 @@ public class OpenSearchMetadata
             // filter pushdown currently not supported for passthrough query
             return Optional.empty();
         }
-        if (handle.type() == AGGREGATION) {
+        if (isAggregation(handle)) {
             // pushing a limit, sort or filter below an already pushed aggregation would change its meaning
             return Optional.empty();
         }
@@ -799,9 +800,14 @@ public class OpenSearchMetadata
         throw new TrinoException(INVALID_FUNCTION_ARGUMENT, "Escape string must be a single character");
     }
 
-    private static boolean isPassthroughQuery(OpenSearchTableHandle table)
+    protected static boolean isPassthroughQuery(OpenSearchTableHandle table)
     {
         return table.type().equals(OpenSearchTableHandle.Type.QUERY);
+    }
+
+    protected static boolean isAggregation(OpenSearchTableHandle table)
+    {
+        return table.type() == AGGREGATION || table.type() == SQL_AGGREGATION;
     }
 
     @Override

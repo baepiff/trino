@@ -590,6 +590,60 @@ public class OpenSearchClient
         return body;
     }
 
+    public String executeSql(String requestBody)
+    {
+        Response response;
+        try {
+            response = client.getLowLevelClient()
+                    .performRequest(
+                            "POST",
+                            "/_plugins/_sql",
+                            ImmutableMap.of(),
+                            new ByteArrayEntity(requestBody.getBytes(UTF_8), APPLICATION_JSON),
+                            new BasicHeader("Accept-Encoding", "application/json"));
+        }
+        catch (ResponseException e) {
+            String body;
+            try {
+                body = EntityUtils.toString(e.getResponse().getEntity());
+            }
+            catch (Exception ignored) {
+                body = "";
+            }
+            throw new TrinoException(OPENSEARCH_QUERY_FAILURE, "OpenSearch SQL request failed: " + formatSqlError(e.getResponse().getStatusLine().getStatusCode(), body), e);
+        }
+        catch (IOException e) {
+            throw new TrinoException(OPENSEARCH_CONNECTION_ERROR, e);
+        }
+
+        try {
+            return EntityUtils.toString(response.getEntity());
+        }
+        catch (Exception e) {
+            throw new TrinoException(OPENSEARCH_INVALID_RESPONSE, e);
+        }
+    }
+
+    static String formatSqlError(int statusCode, String body)
+    {
+        String prefix = "HTTP " + statusCode;
+        try {
+            JsonNode error = JSON_MAPPER.readTree(body).path("error");
+            String reason = error.path("reason").asText("");
+            if (reason.isEmpty()) {
+                return prefix;
+            }
+            String details = error.path("details").asText("");
+            if (details.isEmpty()) {
+                return prefix + ": " + reason;
+            }
+            return prefix + ": " + reason + ": " + details;
+        }
+        catch (IOException | RuntimeException e) {
+            return prefix;
+        }
+    }
+
     public SearchResponse beginSearch(String index, int shard, QueryBuilder query, Optional<List<String>> fields, List<String> documentFields, List<TopNSortItem> sortItems, OptionalLong limit)
     {
         SearchSourceBuilder sourceBuilder = SearchSourceBuilder.searchSource()

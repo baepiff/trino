@@ -52,7 +52,9 @@ public class OpenSearchSplitManager
     {
         OpenSearchTableHandle tableHandle = (OpenSearchTableHandle) table;
 
-        if (tableHandle.type().equals(OpenSearchTableHandle.Type.QUERY) || tableHandle.type().equals(OpenSearchTableHandle.Type.AGGREGATION)) {
+        if (tableHandle.type().equals(OpenSearchTableHandle.Type.QUERY)
+                || tableHandle.type().equals(OpenSearchTableHandle.Type.AGGREGATION)
+                || tableHandle.type().equals(OpenSearchTableHandle.Type.SQL_AGGREGATION)) {
             // aggregations run against the whole index so that OpenSearch merges shard results
             return new FixedSplitSource(new OpenSearchSplit(tableHandle.index(), 0, Optional.empty()));
         }
