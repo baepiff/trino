@@ -415,6 +415,7 @@ jobs:
             !:trino-mysql,
             !:trino-openlineage,
             !:trino-opensearch,
+            !:trino-opensearch-sql,
             !:trino-oracle,
             !:trino-orc,
             !:trino-parquet,

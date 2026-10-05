@@ -229,6 +229,12 @@
         </artifact>
     </artifactSet>
 
+    <artifactSet to="plugin/opensearch-sql">
+        <artifact id="${project.groupId}:trino-opensearch-sql:zip:${project.version}">
+            <unpack />
+        </artifact>
+    </artifactSet>
+
     <artifactSet to="plugin/oracle">
         <artifact id="${project.groupId}:trino-oracle:zip:${project.version}">
             <unpack />

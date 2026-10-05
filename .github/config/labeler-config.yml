@@ -94,6 +94,7 @@ mysql:
 opensearch:
   - changed-files:
     - any-glob-to-any-file: 'plugin/trino-opensearch/**'
+    - any-glob-to-any-file: 'plugin/trino-opensearch-sql/**'
 
 oracle:
   - changed-files:
