@@ -36,7 +36,7 @@ public class OpenSearchSqlConnectorFactory
     @Override
     public String getName()
     {
-        return "opensearch-sql";
+        return "opensearch_sql";
     }
 
     @Override

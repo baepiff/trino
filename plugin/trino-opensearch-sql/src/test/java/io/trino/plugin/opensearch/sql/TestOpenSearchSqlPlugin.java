@@ -36,7 +36,7 @@ public class TestOpenSearchSqlPlugin
         Plugin plugin = new OpenSearchSqlPlugin();
         ConnectorFactory factory = getOnlyElement(plugin.getConnectorFactories());
 
-        assertThat(factory.getName()).isEqualTo("opensearch-sql");
+        assertThat(factory.getName()).isEqualTo("opensearch_sql");
         // building the connector exercises the Guice wiring (base module + SQL overrides) without needing a server
         Connector connector = factory.create("test", ImmutableMap.of("opensearch.host", "localhost"), new TestingConnectorContext());
         try {

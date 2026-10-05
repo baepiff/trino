@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.opensearch.sql;
 
+import com.google.common.collect.ImmutableSet;
 import io.trino.plugin.opensearch.MetricAggregation;
 import io.trino.plugin.opensearch.sql.SqlAggregationQuery.Output;
 import io.trino.spi.TrinoException;
@@ -20,6 +21,7 @@ import io.trino.spi.TrinoException;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static io.trino.plugin.opensearch.MetricAggregation.COUNT;
 import static io.trino.plugin.opensearch.MetricAggregation.STATISTICAL_FUNCTIONS;
@@ -31,7 +33,8 @@ import static java.lang.String.format;
 
 final class SqlAggregationResponseReader
 {
-    private static final String COUNT_TYPE = "long";
+    // the V2 engine reports count as integer (observed on OpenSearch 2.19) or long, the legacy engine as double
+    private static final Set<String> COUNT_TYPES = ImmutableSet.of("integer", "long");
 
     private SqlAggregationResponseReader() {}
 
@@ -95,12 +98,11 @@ final class SqlAggregationResponseReader
     private static void verifyCountColumn(SqlResult result, int index)
     {
         String actual = result.schema().get(index).type();
-        if (!actual.equals(COUNT_TYPE)) {
+        if (!COUNT_TYPES.contains(actual)) {
             throw new TrinoException(OPENSEARCH_QUERY_FAILURE, format(
-                    "OpenSearch SQL returned type '%s' for a count column, expected '%s'. The query was probably answered by the legacy engine. "
+                    "OpenSearch SQL returned type '%s' for a count column, expected 'integer' or 'long'. The query was probably answered by the legacy engine. "
                             + "Set opensearch.sql.global-aggregation-engine=DSL to avoid the SQL path.",
-                    actual,
-                    COUNT_TYPE));
+                    actual));
         }
     }
 }

@@ -40,8 +40,7 @@ final class SqlAggregationQueryBuilder
         for (MetricAggregation aggregation : aggregations) {
             if (aggregation.columnHandle().isEmpty()) {
                 // count(*)
-                outputs.add(new Output(aggregation, selectItems.size(), OptionalInt.empty()));
-                selectItems.add("count(*)");
+                outputs.add(new Output(aggregation, selectIndex(selectItems, "count(*)"), OptionalInt.empty()));
                 continue;
             }
 
@@ -51,26 +50,35 @@ final class SqlAggregationQueryBuilder
             }
             String quoted = SqlIdentifiers.quote(column.name());
 
-            int valueIndex = selectItems.size();
-            selectItems.add(aggregation.functionName() + "(" + quoted + ")");
+            int valueIndex = selectIndex(selectItems, aggregation.functionName() + "(" + quoted + ")");
 
             OptionalInt countIndex = OptionalInt.empty();
             if (aggregation.functionName().equals(SUM) || STATISTICAL_FUNCTIONS.contains(aggregation.functionName())) {
                 // the plugin returns 0 for sum() over no rows, and NULL for population statistics over one row
-                countIndex = OptionalInt.of(selectItems.size());
-                selectItems.add("count(" + quoted + ")");
+                countIndex = OptionalInt.of(selectIndex(selectItems, "count(" + quoted + ")"));
             }
             outputs.add(new Output(aggregation, valueIndex, countIndex));
         }
 
         // the sentinel proves the V2 engine answered: the legacy engine returns count(*) as a double
-        int sentinelIndex = selectItems.size();
-        selectItems.add("count(*)");
+        int sentinelIndex = selectIndex(selectItems, "count(*)");
 
         String sql = "SELECT " + String.join(", ", selectItems) + " FROM " + SqlIdentifiers.quote(index);
         if (!whereClause.isEmpty()) {
             sql += " WHERE " + whereClause;
         }
         return Optional.of(new SqlAggregationQuery(sql, outputs, sentinelIndex, selectItems.size()));
+    }
+
+    // The SQL plugin rejects a statement that selects the same expression twice ("Multiple entries with same key"),
+    // so each expression is selected once and shared by every output that needs it.
+    private static int selectIndex(List<String> selectItems, String expression)
+    {
+        int index = selectItems.indexOf(expression);
+        if (index >= 0) {
+            return index;
+        }
+        selectItems.add(expression);
+        return selectItems.size() - 1;
     }
 }

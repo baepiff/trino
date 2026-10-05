@@ -32,6 +32,7 @@ Memory          <connector/memory>
 MongoDB         <connector/mongodb>
 MySQL           <connector/mysql>
 OpenSearch      <connector/opensearch>
+OpenSearch SQL  <connector/opensearch-sql>
 Oracle          <connector/oracle>
 Pinot           <connector/pinot>
 PostgreSQL      <connector/postgresql>

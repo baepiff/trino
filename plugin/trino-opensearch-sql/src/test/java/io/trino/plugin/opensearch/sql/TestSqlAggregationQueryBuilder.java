@@ -45,9 +45,9 @@ public class TestSqlAggregationQueryBuilder
     {
         SqlAggregationQuery query = SqlAggregationQueryBuilder.build("metric_logs", List.of(aggregation("count", BIGINT, null, 0)), "").orElseThrow();
 
-        assertThat(query.sql()).isEqualTo("SELECT count(*), count(*) FROM `metric_logs`");
-        assertThat(query.sentinelIndex()).isEqualTo(1);
-        assertThat(query.columnCount()).isEqualTo(2);
+        assertThat(query.sql()).isEqualTo("SELECT count(*) FROM `metric_logs`");
+        assertThat(query.sentinelIndex()).isEqualTo(0);
+        assertThat(query.columnCount()).isEqualTo(1);
         assertThat(query.outputs()).singleElement().satisfies(output -> {
             assertThat(output.valueIndex()).isEqualTo(0);
             assertThat(output.countIndex()).isEmpty();
@@ -68,14 +68,14 @@ public class TestSqlAggregationQueryBuilder
         SqlAggregationQuery query = SqlAggregationQueryBuilder.build("metric_logs", aggregations, "`version` > 5").orElseThrow();
 
         assertThat(query.sql()).isEqualTo(
-                "SELECT count(`version`), sum(`version`), count(`version`), min(`version`), avg(`version`), "
-                        + "stddev_pop(`duration`), count(`duration`), var_samp(`duration`), count(`duration`), count(*) "
+                "SELECT count(`version`), sum(`version`), min(`version`), avg(`version`), "
+                        + "stddev_pop(`duration`), count(`duration`), var_samp(`duration`), count(*) "
                         + "FROM `metric_logs` WHERE `version` > 5");
-        assertThat(query.columnCount()).isEqualTo(10);
-        assertThat(query.sentinelIndex()).isEqualTo(9);
-        assertThat(query.outputs()).extracting(SqlAggregationQuery.Output::valueIndex).containsExactly(0, 1, 3, 4, 5, 7);
+        assertThat(query.columnCount()).isEqualTo(8);
+        assertThat(query.sentinelIndex()).isEqualTo(7);
+        assertThat(query.outputs()).extracting(SqlAggregationQuery.Output::valueIndex).containsExactly(0, 1, 2, 3, 4, 6);
         assertThat(query.outputs()).extracting(SqlAggregationQuery.Output::countIndex)
-                .containsExactly(OptionalInt.empty(), OptionalInt.of(2), OptionalInt.empty(), OptionalInt.empty(), OptionalInt.of(6), OptionalInt.of(8));
+                .containsExactly(OptionalInt.empty(), OptionalInt.of(0), OptionalInt.empty(), OptionalInt.empty(), OptionalInt.of(5), OptionalInt.of(5));
     }
 
     @Test

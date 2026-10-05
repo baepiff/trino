@@ -49,8 +49,8 @@ public class TestSqlAggregationResponseReader
 
     private static final SqlAggregationQuery QUERY = SqlAggregationQueryBuilder.build("metric_logs", AGGREGATIONS, "").orElseThrow();
 
-    // columns: count(*), sum, count, min, avg, stddev_pop, count, var_samp, count, sentinel
-    private static final List<String> TYPES = List.of("long", "long", "long", "integer", "double", "double", "long", "double", "long", "long");
+    // columns: count(*) (also the sentinel), sum, count, min, avg, stddev_pop, count, var_samp
+    private static final List<String> TYPES = List.of("long", "long", "long", "integer", "double", "double", "long", "double");
 
     private static SqlResult result(List<String> types, Object... row)
     {
@@ -64,16 +64,27 @@ public class TestSqlAggregationResponseReader
     @Test
     public void testValues()
     {
-        Map<String, Object> values = SqlAggregationResponseReader.read(QUERY, result(TYPES, 10L, 55L, 10L, 1, 5.5, 2.5, 10L, 7.0, 10L, 10L));
+        Map<String, Object> values = SqlAggregationResponseReader.read(QUERY, result(TYPES, 10L, 55L, 10L, 1, 5.5, 2.5, 10L, 7.0));
 
         assertThat(values).containsEntry("a0", 10L).containsEntry("a1", 55L).containsEntry("a2", 1).containsEntry("a3", 5.5)
                 .containsEntry("a4", 2.5).containsEntry("a5", 7.0);
     }
 
     @Test
+    public void testIntegerCountColumnsAreAccepted()
+    {
+        // OpenSearch 2.19 reports count as integer
+        List<String> integerCountTypes = List.of("integer", "long", "integer", "integer", "double", "double", "integer", "double");
+
+        Map<String, Object> values = SqlAggregationResponseReader.read(QUERY, result(integerCountTypes, 10, 55L, 10, 1, 5.5, 2.5, 10, 7.0));
+
+        assertThat(values).containsEntry("a0", 10L).containsEntry("a1", 55L);
+    }
+
+    @Test
     public void testEmptyInput()
     {
-        Map<String, Object> values = SqlAggregationResponseReader.read(QUERY, result(TYPES, 0L, 0L, 0L, null, null, null, 0L, null, 0L, 0L));
+        Map<String, Object> values = SqlAggregationResponseReader.read(QUERY, result(TYPES, 0L, 0L, 0L, null, null, null, 0L, null));
 
         Map<String, Object> expected = new HashMap<>();
         expected.put("a0", 0L);
@@ -89,7 +100,7 @@ public class TestSqlAggregationResponseReader
     public void testSingleRowStatistics()
     {
         // population statistics over one row are NULL in the SQL plugin but 0.0 in Trino, sample statistics stay NULL
-        Map<String, Object> values = SqlAggregationResponseReader.read(QUERY, result(TYPES, 1L, 4L, 1L, 4, 4.0, null, 1L, null, 1L, 1L));
+        Map<String, Object> values = SqlAggregationResponseReader.read(QUERY, result(TYPES, 1L, 4L, 1L, 4, 4.0, null, 1L, null));
 
         assertThat(values.get("a4")).isEqualTo(0.0);
         assertThat(values.get("a5")).isNull();
@@ -99,9 +110,9 @@ public class TestSqlAggregationResponseReader
     public void testLegacyEngineFallbackIsDetected()
     {
         List<String> legacyTypes = new ArrayList<>(TYPES);
-        legacyTypes.set(legacyTypes.size() - 1, "double");
+        legacyTypes.set(0, "double");
 
-        assertThatThrownBy(() -> SqlAggregationResponseReader.read(QUERY, result(legacyTypes, 10L, 55L, 10L, 1, 5.5, 2.5, 10L, 7.0, 10L, 10.0)))
+        assertThatThrownBy(() -> SqlAggregationResponseReader.read(QUERY, result(legacyTypes, 10.0, 55L, 10L, 1, 5.5, 2.5, 10L, 7.0)))
                 .isInstanceOf(TrinoException.class)
                 .hasMessageContaining("legacy engine")
                 .hasMessageContaining("opensearch.sql.global-aggregation-engine");
@@ -113,7 +124,7 @@ public class TestSqlAggregationResponseReader
         List<String> badTypes = new ArrayList<>(TYPES);
         badTypes.set(2, "double");
 
-        assertThatThrownBy(() -> SqlAggregationResponseReader.read(QUERY, result(badTypes, 10L, 55L, 10.0, 1, 5.5, 2.5, 10L, 7.0, 10L, 10L)))
+        assertThatThrownBy(() -> SqlAggregationResponseReader.read(QUERY, result(badTypes, 10L, 55L, 10.0, 1, 5.5, 2.5, 10L, 7.0)))
                 .isInstanceOf(TrinoException.class)
                 .hasMessageContaining("legacy engine");
     }
@@ -123,7 +134,7 @@ public class TestSqlAggregationResponseReader
     {
         assertThatThrownBy(() -> SqlAggregationResponseReader.read(QUERY, new SqlResult(List.of(new SqlColumn("c0", "long")), List.of(List.of(1L)))))
                 .isInstanceOf(TrinoException.class)
-                .hasMessageContaining("expected 10 columns");
+                .hasMessageContaining("expected 8 columns");
 
         SqlResult noRows = new SqlResult(result(TYPES, 1L, 1L, 1L, 1, 1.0, 1.0, 1L, 1.0, 1L, 1L).schema(), List.of());
         assertThatThrownBy(() -> SqlAggregationResponseReader.read(QUERY, noRows))

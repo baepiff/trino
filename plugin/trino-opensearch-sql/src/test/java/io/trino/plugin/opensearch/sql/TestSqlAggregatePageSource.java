@@ -168,7 +168,7 @@ public class TestSqlAggregatePageSource
             assertThat(pageSource.isFinished()).isFalse();
 
             SourcePage page = pageSource.getNextSourcePage();
-            assertThat(sqlClient.statements()).containsExactly("SELECT count(*), max(`version`), count(*) FROM `metric_logs`");
+            assertThat(sqlClient.statements()).containsExactly("SELECT count(*), max(`version`) FROM `metric_logs`");
             assertThat(page.getPositionCount()).isEqualTo(1);
             assertThat(BIGINT.getLong(page.getBlock(0), 0)).isEqualTo(5L);
             // OpenSearch SQL returns the max of an INTEGER field as a long
@@ -243,8 +243,8 @@ public class TestSqlAggregatePageSource
         {
             statements.add(sql);
             return new SqlResult(
-                    List.of(new SqlColumn("c0", "long"), new SqlColumn("c1", "integer"), new SqlColumn("c2", "long")),
-                    List.of(List.of(5L, 7L, 5L)));
+                    List.of(new SqlColumn("c0", "long"), new SqlColumn("c1", "integer")),
+                    List.of(List.of(5L, 7L)));
         }
     }
 }
