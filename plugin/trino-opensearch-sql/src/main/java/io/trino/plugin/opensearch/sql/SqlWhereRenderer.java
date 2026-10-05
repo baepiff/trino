@@ -82,7 +82,8 @@ final class SqlWhereRenderer
 
     private static Optional<String> renderDomain(OpenSearchColumnHandle column, Domain domain)
     {
-        if (column.path().size() != 1 || !SqlIdentifiers.isQuotable(column.name())) {
+        // builtin columns, nested columns and columns unsupported for predicates are never rendered
+        if (!column.supportsPredicates() || isBuiltinColumn(column.name()) || column.path().size() != 1 || !SqlIdentifiers.isQuotable(column.name())) {
             return Optional.empty();
         }
         if (domain.isAll()) {
@@ -141,13 +142,17 @@ final class SqlWhereRenderer
             }
             parts.add(name + (range.isHighInclusive() ? " <= " : " < ") + literal.get());
         }
-        if (parts.isEmpty()) {
-            return Optional.of(name + " IS NOT NULL");
-        }
+        // an unbounded range is never present here: isAll is handled earlier, so parts is not empty
         if (parts.size() == 1) {
             return Optional.of(parts.getFirst());
         }
         return Optional.of("(" + String.join(" AND ", parts) + ")");
+    }
+
+    private static boolean isBuiltinColumn(String name)
+    {
+        // mapping fields cannot be named like this, so a name check identifies the builtin columns
+        return name.equals("_id") || name.equals("_source") || name.equals("_score");
     }
 
     private static boolean isRenderableType(Type type)

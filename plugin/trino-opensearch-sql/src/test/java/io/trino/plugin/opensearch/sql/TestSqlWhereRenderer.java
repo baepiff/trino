@@ -122,6 +122,7 @@ public class TestSqlWhereRenderer
         assertThat(render(SCORE, Domain.create(ValueSet.ofRanges(Range.greaterThan(DOUBLE, 0.1)), false))).hasValue("`score` > 0.1");
         // REAL values are widened to double so that they compare equal to the stored float
         assertThat(render(RATING, Domain.create(ValueSet.ofRanges(Range.greaterThan(REAL, (long) Float.floatToRawIntBits(0.1f))), false))).hasValue("`rating` > 0.10000000149011612");
+        // there is no NaN assertion: Domain and Range reject NaN, so such a constraint cannot be built
         assertThat(render(SCORE, Domain.singleValue(DOUBLE, Double.POSITIVE_INFINITY))).isEmpty();
         assertThat(render(SCORE, Domain.singleValue(DOUBLE, 1e300))).isEmpty();
     }
@@ -152,6 +153,27 @@ public class TestSqlWhereRenderer
 
         OpenSearchColumnHandle array = new OpenSearchColumnHandle(List.of("tags"), new ArrayType(VARCHAR), new IndexMetadata.PrimitiveType("keyword"), new VarcharDecoder.Descriptor("tags"), true);
         assertThat(render(array, Domain.onlyNull(new ArrayType(VARCHAR)))).isEmpty();
+    }
+
+    @Test
+    public void testBuiltinAndPredicateUnsupportedColumnsAreNotRendered()
+    {
+        OpenSearchColumnHandle id = new OpenSearchColumnHandle(List.of("_id"), VARCHAR, new IndexMetadata.PrimitiveType("keyword"), new VarcharDecoder.Descriptor("_id"), true);
+        assertThat(render(id, Domain.singleValue(VARCHAR, utf8Slice("x")))).isEmpty();
+
+        OpenSearchColumnHandle score = new OpenSearchColumnHandle(List.of("_score"), REAL, new IndexMetadata.PrimitiveType("float"), new RealDecoder.Descriptor("_score"), false);
+        assertThat(render(score, Domain.create(ValueSet.ofRanges(Range.greaterThan(REAL, (long) Float.floatToRawIntBits(1.0f))), false)))
+                .isEmpty();
+
+        OpenSearchColumnHandle source = new OpenSearchColumnHandle(List.of("_source"), VARCHAR, new IndexMetadata.PrimitiveType("keyword"), new VarcharDecoder.Descriptor("_source"), true);
+        assertThat(render(source, Domain.onlyNull(VARCHAR))).isEmpty();
+
+        // text-mapped and scaled_float columns are flagged as unsupported for predicates
+        OpenSearchColumnHandle text = new OpenSearchColumnHandle(List.of("message"), VARCHAR, new IndexMetadata.PrimitiveType("text"), new VarcharDecoder.Descriptor("message"), false);
+        assertThat(render(text, Domain.singleValue(VARCHAR, utf8Slice("x")))).isEmpty();
+
+        OpenSearchColumnHandle scaled = new OpenSearchColumnHandle(List.of("price"), DOUBLE, new IndexMetadata.ScaledFloatType(100), new DoubleDecoder.Descriptor("price"), false);
+        assertThat(render(scaled, Domain.singleValue(DOUBLE, 1.5))).isEmpty();
     }
 
     private static long micros(Instant instant)
