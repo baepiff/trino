@@ -34,6 +34,8 @@ import static java.util.Objects.requireNonNull;
 public class OpenSearchSqlClient
 {
     private static final JsonMapper JSON_MAPPER = new JsonMapperProvider().get();
+    private static final String COLD_START_ERROR = "can't evaluate on aggregator";
+    private static final long COLD_START_RETRY_DELAY_MILLIS = 500;
 
     private final OpenSearchClient client;
 
@@ -52,7 +54,49 @@ public class OpenSearchSqlClient
         catch (JsonProcessingException e) {
             throw new TrinoException(GENERIC_INTERNAL_ERROR, "Failed to encode the OpenSearch SQL request", e);
         }
-        return parse(client.executeSql(requestBody));
+        String response;
+        try {
+            response = send(requestBody);
+        }
+        catch (TrinoException e) {
+            if (!isColdStartAggregationError(e)) {
+                throw e;
+            }
+            // The SQL plugin sometimes rejects the first aggregation statements that run concurrently on a cold cluster, the same statement succeeds moments later
+            pauseBeforeRetry();
+            try {
+                response = send(requestBody);
+            }
+            catch (TrinoException retryFailure) {
+                retryFailure.addSuppressed(e);
+                throw retryFailure;
+            }
+        }
+        return parse(response);
+    }
+
+    String send(String requestBody)
+    {
+        return client.executeSql(requestBody);
+    }
+
+    void pauseBeforeRetry()
+    {
+        try {
+            Thread.sleep(COLD_START_RETRY_DELAY_MILLIS);
+        }
+        catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new TrinoException(OPENSEARCH_QUERY_FAILURE, "Interrupted while waiting to retry the OpenSearch SQL request", e);
+        }
+    }
+
+    private static boolean isColdStartAggregationError(TrinoException e)
+    {
+        String message = e.getMessage();
+        return e.getErrorCode().equals(OPENSEARCH_QUERY_FAILURE.toErrorCode())
+                && message != null
+                && message.contains(COLD_START_ERROR);
     }
 
     static SqlResult parse(String body)

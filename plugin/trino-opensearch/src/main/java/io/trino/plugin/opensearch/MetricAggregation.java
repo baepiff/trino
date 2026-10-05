@@ -107,6 +107,7 @@ public record MetricAggregation(String functionName, Type outputType, Optional<O
             // BIGINT is excluded: metric aggregations return doubles, so values above 2^53 lose precision
             case MIN, MAX -> inputType.equals(TINYINT) || inputType.equals(SMALLINT) || inputType.equals(INTEGER) || inputType.equals(REAL) || inputType.equals(DOUBLE);
             // REAL is excluded: OpenSearch accumulates in double while Trino accumulates in single precision
+            // The integer input types are not reachable today: Trino plans sum and avg over them on a CAST to BIGINT or DOUBLE, which is never pushed down
             case SUM, AVG, STDDEV_SAMP, STDDEV_POP, VAR_SAMP, VAR_POP -> inputType.equals(TINYINT) || inputType.equals(SMALLINT) || inputType.equals(INTEGER) || inputType.equals(DOUBLE);
             default -> false;
         };

@@ -17,7 +17,15 @@ OpenSearch connector.
 - OpenSearch 2.19, the version this connector was developed against. Other
   versions are not verified.
 - The OpenSearch SQL plugin installed and enabled. The cluster setting
-  `plugins.sql.enabled` must not be set to `false`.
+  `plugins.sql.enabled` must not be set to `false`. On a cluster without the
+  plugin, use the [](/connector/opensearch) instead, or set the catalog session
+  property `aggregation_pushdown_enabled` to `false`. With
+  `opensearch.sql.global-aggregation-engine=DSL` the statistical functions
+  still need the SQL plugin.
+- When the OpenSearch security plugin is enabled, the user that Trino
+  authenticates as needs the permission to use the SQL plugin in addition to
+  the permissions to read the indices. See the OpenSearch security
+  documentation for the permissions of the SQL plugin.
 - Network access from the Trino coordinator and workers to the OpenSearch nodes.
 
 ## Configuration
@@ -142,6 +150,42 @@ in your query, and the connector checks its result type. If the response does no
 error that names the property `opensearch.sql.global-aggregation-engine=DSL`.
 To avoid the SQL path for such a cluster, set the property to `DSL`. With that
 setting only the statistical functions require the SQL plugin.
+
+(opensearch-sql-cold-start)=
+### Retry on cold start
+
+On OpenSearch 2.19.4 the SQL plugin sometimes rejects the first aggregation
+statements that arrive concurrently on a cold cluster with the HTTP status 400
+and a message that contains `can't evaluate on aggregator`. The same statement
+succeeds moments later. The connector retries such a statement once, after 500
+milliseconds. Any other error is not retried. If the retry fails as well, the
+query fails with the error of the retry, and the first error is attached to it
+as a suppressed exception.
+
+### Count range
+
+The new engine of the SQL plugin reports `count` as a 32-bit `integer` on
+OpenSearch 2.19, and a larger count could be capped or wrapped without notice.
+The connector fails the query when an `integer` typed count is negative or
+equal to or greater than 2,147,483,647 (`Integer.MAX_VALUE`). The error message
+names the property `opensearch.sql.global-aggregation-engine=DSL`, which
+answers counts with search aggregations. A count with the type `long` is
+accepted at any size. A `NULL` or non-numeric value in a count column also fails
+the query.
+
+### Precision of statistical functions
+
+The SQL plugin of OpenSearch 2.19 appears to compute `stddev`, `stddev_samp`,
+`stddev_pop`, `variance`, `var_samp` and `var_pop` from the sum of squares,
+which loses precision when the values are large compared to their spread. In a
+test with 100 `double` values of the form `1e9 + (n mod 5)`, the plugin returned
+`0.0` for `stddev_pop`, `var_pop`, `stddev` and `variance`, where the exact
+results are `1.414...`, `2.0`, `1.421...` and `2.020...`. Trino returned values
+that agree with the exact ones to better than 1e-8 when it computed the
+statistics itself. If your data has such a shape, set the catalog session
+property `aggregation_pushdown_enabled` to `false`, or the catalog property
+`opensearch.aggregation-pushdown-enabled` to `false`, so that Trino computes the
+statistics.
 
 ## Limitations
 

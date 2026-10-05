@@ -52,7 +52,7 @@ final class SqlAggregationResponseReader
                     query.columnCount()));
         }
 
-        verifyCountColumn(result, query.sentinelIndex());
+        countValue(result, query.sentinelIndex(), row.get(query.sentinelIndex()));
         Map<String, Object> values = new HashMap<>();
         for (Output output : query.outputs()) {
             MetricAggregation aggregation = output.aggregation();
@@ -60,14 +60,13 @@ final class SqlAggregationResponseReader
             String function = aggregation.functionName();
 
             if (aggregation.columnHandle().isEmpty() || function.equals(COUNT)) {
-                verifyCountColumn(result, output.valueIndex());
-                values.put(aggregation.alias(), ((Number) value).longValue());
+                values.put(aggregation.alias(), countValue(result, output.valueIndex(), value));
                 continue;
             }
 
             if (output.countIndex().isPresent()) {
-                verifyCountColumn(result, output.countIndex().orElseThrow());
-                long count = ((Number) row.get(output.countIndex().orElseThrow())).longValue();
+                int countIndex = output.countIndex().orElseThrow();
+                long count = countValue(result, countIndex, row.get(countIndex));
                 values.put(aggregation.alias(), companionValue(function, count, value));
                 continue;
             }
@@ -95,14 +94,26 @@ final class SqlAggregationResponseReader
         return value;
     }
 
-    private static void verifyCountColumn(SqlResult result, int index)
+    private static long countValue(SqlResult result, int index, Object value)
     {
-        String actual = result.schema().get(index).type();
-        if (!COUNT_TYPES.contains(actual)) {
+        String type = result.schema().get(index).type();
+        if (!COUNT_TYPES.contains(type)) {
             throw new TrinoException(OPENSEARCH_QUERY_FAILURE, format(
                     "OpenSearch SQL returned type '%s' for a count column, expected 'integer' or 'long'. The query was probably answered by the legacy engine. "
                             + "Set opensearch.sql.global-aggregation-engine=DSL to avoid the SQL path.",
-                    actual));
+                    type));
         }
+        if (!(value instanceof Number number)) {
+            throw new TrinoException(OPENSEARCH_QUERY_FAILURE, format("OpenSearch SQL returned %s for a count column, expected a number", value == null ? "NULL" : "a non-numeric value"));
+        }
+        long count = number.longValue();
+        // The V2 engine types count as a 32-bit integer on OpenSearch 2.19, so a larger count may have been capped or wrapped without notice
+        if (type.equals("integer") && (count < 0 || count >= Integer.MAX_VALUE)) {
+            throw new TrinoException(OPENSEARCH_QUERY_FAILURE, format(
+                    "OpenSearch SQL returned %s for an integer-typed count column, the count may have overflowed 32 bits. "
+                            + "Set opensearch.sql.global-aggregation-engine=DSL or use the opensearch connector to get an exact count.",
+                    count));
+        }
+        return count;
     }
 }

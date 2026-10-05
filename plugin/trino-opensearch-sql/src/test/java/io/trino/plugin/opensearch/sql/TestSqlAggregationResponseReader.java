@@ -141,4 +141,47 @@ public class TestSqlAggregationResponseReader
                 .isInstanceOf(TrinoException.class)
                 .hasMessageContaining("expected one row");
     }
+
+    @Test
+    public void testIntegerTypedCountBoundaries()
+    {
+        List<String> integerCountTypes = List.of("integer", "long", "integer", "integer", "double", "double", "integer", "double");
+
+        Map<String, Object> values = SqlAggregationResponseReader.read(QUERY, result(integerCountTypes, Integer.MAX_VALUE - 1, 55L, Integer.MAX_VALUE - 1, 1, 5.5, 2.5, Integer.MAX_VALUE - 1, 7.0));
+        assertThat(values).containsEntry("a0", (long) Integer.MAX_VALUE - 1);
+
+        assertThatThrownBy(() -> SqlAggregationResponseReader.read(QUERY, result(integerCountTypes, Integer.MAX_VALUE, 55L, 10, 1, 5.5, 2.5, 10, 7.0)))
+                .isInstanceOf(TrinoException.class)
+                .hasMessageContaining("overflowed")
+                .hasMessageContaining("opensearch.sql.global-aggregation-engine=DSL");
+        assertThatThrownBy(() -> SqlAggregationResponseReader.read(QUERY, result(integerCountTypes, -5, 55L, 10, 1, 5.5, 2.5, 10, 7.0)))
+                .isInstanceOf(TrinoException.class)
+                .hasMessageContaining("overflowed");
+        // a companion count is checked too
+        assertThatThrownBy(() -> SqlAggregationResponseReader.read(QUERY, result(integerCountTypes, 10, 55L, Integer.MAX_VALUE, 1, 5.5, 2.5, 10, 7.0)))
+                .isInstanceOf(TrinoException.class)
+                .hasMessageContaining("overflowed");
+    }
+
+    @Test
+    public void testLongTypedCountAboveIntegerRangeIsAccepted()
+    {
+        long large = Integer.MAX_VALUE + 10L;
+
+        Map<String, Object> values = SqlAggregationResponseReader.read(QUERY, result(TYPES, large, 55L, large, 1, 5.5, 2.5, large, 7.0));
+
+        assertThat(values).containsEntry("a0", large);
+    }
+
+    @Test
+    public void testNullOrNonNumericCountIsRejected()
+    {
+        assertThatThrownBy(() -> SqlAggregationResponseReader.read(QUERY, result(TYPES, null, 55L, 10L, 1, 5.5, 2.5, 10L, 7.0)))
+                .isInstanceOf(TrinoException.class)
+                .hasMessageContaining("NULL")
+                .hasMessageContaining("count column");
+        assertThatThrownBy(() -> SqlAggregationResponseReader.read(QUERY, result(TYPES, 10L, 55L, "ten", 1, 5.5, 2.5, 10L, 7.0)))
+                .isInstanceOf(TrinoException.class)
+                .hasMessageContaining("non-numeric");
+    }
 }

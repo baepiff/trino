@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.opensearch.sql;
 
+import com.google.common.collect.ImmutableList;
 import io.trino.plugin.opensearch.MetricAggregation;
 
 import java.util.List;
@@ -25,7 +26,7 @@ record SqlAggregationQuery(String sql, List<Output> outputs, int sentinelIndex, 
     SqlAggregationQuery
     {
         requireNonNull(sql, "sql is null");
-        outputs = List.copyOf(requireNonNull(outputs, "outputs is null"));
+        outputs = ImmutableList.copyOf(requireNonNull(outputs, "outputs is null"));
     }
 
     record Output(MetricAggregation aggregation, int valueIndex, OptionalInt countIndex)

@@ -149,6 +149,66 @@ public class TestOpenSearchSqlConnector
     }
 
     @Test
+    public void testStatisticalFunctionsLosePrecisionOverLargeValuesWithSmallSpread()
+            throws IOException
+    {
+        String table = "test_sql_precision_" + randomNameSuffix();
+        createIndex(table, MAPPING);
+        try {
+            StringBuilder payload = new StringBuilder();
+            double[] values = new double[100];
+            for (int id = 0; id < values.length; id++) {
+                values[id] = 1e9 + id % 5;
+                payload.append(JSON_MAPPER.writeValueAsString(ImmutableMap.of("index", ImmutableMap.of("_index", table, "_id", String.valueOf(id)))))
+                        .append("\n")
+                        .append(JSON_MAPPER.writeValueAsString(ImmutableMap.of("d", values[id])))
+                        .append("\n");
+            }
+            bulkIndex(payload.toString());
+
+            // two-pass reference
+            double mean = 0;
+            for (double value : values) {
+                mean += value;
+            }
+            mean /= values.length;
+            double squares = 0;
+            for (double value : values) {
+                squares += (value - mean) * (value - mean);
+            }
+            double variancePopulation = squares / values.length;
+            double varianceSample = squares / (values.length - 1);
+
+            double[] expected = {Math.sqrt(variancePopulation), variancePopulation, Math.sqrt(varianceSample), varianceSample};
+
+            String sql = "SELECT stddev_pop(d), var_pop(d), stddev(d), variance(d) FROM " + table;
+            assertPushedDownBySql(sql);
+            MaterializedRow pushed = getOnlyElement(computeActual(sql).getMaterializedRows());
+
+            // Characterization of a precision problem of the OpenSearch 2.19 SQL plugin: it derives the variance from
+            // the sum of squares, so the cancellation at 1e9 values with a spread of about 1 loses all digits. Observed:
+            // 0.0 for all four functions instead of 1.414.., 2.0, 1.421.. and 2.020... This test is expected to change
+            // when the plugin computes the statistics in a numerically stable way.
+            for (int column = 0; column < expected.length; column++) {
+                double relativeError = Math.abs((Double) pushed.getField(column) - expected[column]) / expected[column];
+                assertThat(relativeError).as("column %s", column).isGreaterThan(1e-6);
+            }
+
+            // Trino computes the same statistics accurately when the aggregation is not pushed down
+            Session unpushed = Session.builder(getSession())
+                    .setCatalogSessionProperty(CATALOG, "aggregation_pushdown_enabled", "false")
+                    .build();
+            MaterializedRow accurate = getOnlyElement(computeActual(unpushed, sql).getMaterializedRows());
+            for (int column = 0; column < expected.length; column++) {
+                assertThat((Double) accurate.getField(column)).as("column %s", column).isCloseTo(expected[column], within(expected[column] * 1e-6));
+            }
+        }
+        finally {
+            deleteIndex(table);
+        }
+    }
+
+    @Test
     public void testEmptyAndSingleRowSemantics()
             throws IOException
     {
