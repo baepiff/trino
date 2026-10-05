@@ -51,7 +51,8 @@ connector adds the following property:
     aggregations are pushed down as SQL statements to the OpenSearch SQL
     plugin. With `DSL`, the aggregations that the OpenSearch connector supports
     are pushed down as search aggregations, and only the statistical functions
-    `stddev`, `stddev_pop`, `variance` and `var_pop` use the SQL plugin. The
+    `stddev`, `stddev_samp`, `stddev_pop`, `variance`, `var_samp` and `var_pop`
+    use the SQL plugin. The
     catalog session property `global_aggregation_engine` overrides this value
     for a session.
   - `SQL`
@@ -93,7 +94,7 @@ of the OpenSearch connector, or to the processing in Trino.
 * - Function
   - Input types
 * - `count(*)`
-  - 
+  -
 * - `count(column)`
   - Any column that supports predicate push down.
 * - `min(column)`, `max(column)`
@@ -102,8 +103,8 @@ of the OpenSearch connector, or to the processing in Trino.
   - `DOUBLE`. Trino evaluates `sum` and `avg` of `TINYINT`, `SMALLINT` and
     `INTEGER` columns over a `BIGINT` cast of the column, and such a cast
     prevents the push down. These aggregates stay in Trino.
-* - `stddev(column)`, `stddev_pop(column)`, `variance(column)`,
-    `var_pop(column)`
+* - `stddev(column)`, `stddev_samp(column)`, `stddev_pop(column)`,
+    `variance(column)`, `var_samp(column)`, `var_pop(column)`
   - `DOUBLE`. Arguments that Trino casts first, such as `INTEGER` columns, are
     not pushed down.
 :::
@@ -123,11 +124,12 @@ The connector reads the aggregate values from the SQL plugin response and
 adjusts the following results so that they match the results of Trino:
 
 - `sum` over no rows returns `NULL`. The SQL plugin returns `0` for this case.
-  The connector adds a `count(column)` to the statement to detect the case.
+  The connector adds a `count(column)` to the statement to detect the case. The
+  statement always includes a `count(*)` check column too.
 - `stddev_pop` and `var_pop` over exactly one row return `0.0`. The SQL plugin
   returns `NULL` for this case.
-- `stddev`, `variance` and the other sample statistics over fewer than two rows
-  return `NULL`.
+- `stddev`, `stddev_samp`, `variance`, `var_samp` and the other sample
+  statistics over fewer than two rows return `NULL`.
 
 (opensearch-sql-legacy-engine)=
 ### Legacy engine detection
@@ -135,8 +137,8 @@ adjusts the following results so that they match the results of Trino:
 The SQL plugin can answer a statement with its legacy engine when the new engine
 does not support the statement. The legacy engine can return different result
 types, for example a floating point value for `count(*)`. Every generated
-statement includes an additional `count(*)` and the connector checks its result
-type. If the response does not have the expected type, the query fails with an
+statement includes a `count(*)` check column, which is shared with a `count(*)`
+in your query, and the connector checks its result type. If the response does not have the expected type, the query fails with an
 error that names the property `opensearch.sql.global-aggregation-engine=DSL`.
 To avoid the SQL path for such a cluster, set the property to `DSL`. With that
 setting only the statistical functions require the SQL plugin.

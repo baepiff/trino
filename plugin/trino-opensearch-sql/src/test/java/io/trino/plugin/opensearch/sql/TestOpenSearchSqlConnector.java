@@ -28,6 +28,7 @@ import org.opensearch.client.Request;
 import org.opensearch.client.RestHighLevelClient;
 
 import java.io.IOException;
+import java.util.List;
 import java.util.Map;
 
 import static com.google.common.collect.Iterables.getOnlyElement;
@@ -69,7 +70,30 @@ public class TestOpenSearchSqlConnector
     {
         opensearch = new OpenSearchServer(OPENSEARCH_IMAGE, false, ImmutableMap.of());
         client = createClient(opensearch.getAddress());
+        warmUpSqlPlugin();
         return OpenSearchSqlQueryRunner.create(opensearch.getAddress(), ImmutableMap.of());
+    }
+
+    // Observed on OpenSearch 2.19.4: aggregation statements that arrive at the same time while the SQL plugin is still
+    // cold can fail with "HTTP 400: can't evaluate on aggregator: <function>" (the plugin evaluates the aggregation in
+    // memory instead of pushing it down). The tests run in parallel, so the plugin is exercised with one statement
+    // per aggregate function before the first test starts.
+    private void warmUpSqlPlugin()
+            throws IOException
+    {
+        String warmUpIndex = "warm_up_" + randomNameSuffix();
+        createIndex(warmUpIndex, MAPPING);
+        try {
+            index(warmUpIndex, ImmutableMap.of("g", "a", "i", 1, "d", 1.0, "l", 1));
+            for (String function : List.of("count(*)", "count(`i`)", "min(`i`)", "max(`i`)", "sum(`d`)", "avg(`d`)", "stddev_samp(`d`)", "stddev_pop(`d`)", "var_samp(`d`)", "var_pop(`d`)")) {
+                Request request = new Request("POST", "/_plugins/_sql");
+                request.setJsonEntity(JSON_MAPPER.writeValueAsString(ImmutableMap.of("query", "SELECT %s FROM `%s`".formatted(function, warmUpIndex))));
+                client.getLowLevelClient().performRequest(request);
+            }
+        }
+        finally {
+            deleteIndex(warmUpIndex);
+        }
     }
 
     @AfterAll
@@ -97,6 +121,7 @@ public class TestOpenSearchSqlConnector
             assertThat(query(sql))
                     .matches("VALUES (BIGINT '3', BIGINT '3', INTEGER '1', INTEGER '10', DOUBLE '7.0', DOUBLE '2.3333333333333335', DOUBLE '1.0', DOUBLE '4.0')")
                     .isFullyPushedDown();
+            assertPushedDownBySql(sql);
         }
         finally {
             deleteIndex(table);
@@ -111,7 +136,7 @@ public class TestOpenSearchSqlConnector
         try {
             // population and sample statistics of d = [1.0, 2.0, 4.0]
             String sql = "SELECT stddev(d), stddev_pop(d), variance(d), var_pop(d) FROM " + table;
-            assertPushedDown(sql);
+            assertPushedDownBySql(sql);
             MaterializedRow row = getOnlyElement(computeActual(sql).getMaterializedRows());
             assertThat((Double) row.getField(0)).isCloseTo(1.5275252316519468, within(1e-9));
             assertThat((Double) row.getField(1)).isCloseTo(1.247219128924647, within(1e-9));
@@ -130,13 +155,19 @@ public class TestOpenSearchSqlConnector
         String table = createStandardIndex();
         try {
             // empty input: count 0, everything else NULL (the plugin returns 0 for sum)
-            assertThat(query("SELECT count(*), count(i), sum(d), avg(d), min(i), max(i), stddev(d), var_pop(d) FROM " + table + " WHERE g = 'no_such_value'"))
-                    .matches("VALUES (BIGINT '0', BIGINT '0', CAST(NULL AS DOUBLE), CAST(NULL AS DOUBLE), CAST(NULL AS INTEGER), CAST(NULL AS INTEGER), CAST(NULL AS DOUBLE), CAST(NULL AS DOUBLE))");
-            assertPushedDown("SELECT sum(d), stddev(d) FROM " + table + " WHERE g = 'no_such_value'");
+            String emptySql = "SELECT count(*), count(i), sum(d), avg(d), min(i), max(i), stddev(d), var_pop(d) FROM " + table + " WHERE g = 'no_such_value'";
+            assertThat(query(emptySql))
+                    .matches("VALUES (BIGINT '0', BIGINT '0', CAST(NULL AS DOUBLE), CAST(NULL AS DOUBLE), CAST(NULL AS INTEGER), CAST(NULL AS INTEGER), CAST(NULL AS DOUBLE), CAST(NULL AS DOUBLE))")
+                    .isFullyPushedDown();
+            assertPushedDownBySql(emptySql);
+            assertPushedDownBySql("SELECT sum(d), stddev(d) FROM " + table + " WHERE g = 'no_such_value'");
 
             // one row: population statistics are 0.0, sample statistics NULL
-            assertThat(query("SELECT stddev_pop(d), var_pop(d), stddev(d), variance(d) FROM " + table + " WHERE g = 'b'"))
-                    .matches("VALUES (DOUBLE '0.0', DOUBLE '0.0', CAST(NULL AS DOUBLE), CAST(NULL AS DOUBLE))");
+            String singleRowSql = "SELECT stddev_pop(d), var_pop(d), stddev(d), variance(d) FROM " + table + " WHERE g = 'b'";
+            assertThat(query(singleRowSql))
+                    .matches("VALUES (DOUBLE '0.0', DOUBLE '0.0', CAST(NULL AS DOUBLE), CAST(NULL AS DOUBLE))")
+                    .isFullyPushedDown();
+            assertPushedDownBySql(singleRowSql);
         }
         finally {
             deleteIndex(table);
@@ -255,6 +286,8 @@ public class TestOpenSearchSqlConnector
         }
     }
 
+    // Characterization test: it records the current behavior and is expected to change if cast pushdown
+    // (applyProjection of CAST) is added to the connector.
     @Test
     public void testSumAndAvgOverIntegerColumnsStayInTrino()
             throws IOException
@@ -281,9 +314,16 @@ public class TestOpenSearchSqlConnector
             Session dsl = Session.builder(getSession())
                     .setCatalogSessionProperty(CATALOG, "global_aggregation_engine", "DSL")
                     .build();
-            // base set stays pushed (DSL aggregation), statistical functions still go through SQL
-            assertThat(query(dsl, "SELECT count(*), sum(d) FROM " + table)).isFullyPushedDown();
-            assertPushedDown(dsl, "SELECT stddev(d) FROM " + table);
+            // base set stays pushed as search aggregations (AGGREGATION), statistical functions still go through SQL
+            String baseSql = "SELECT count(*), sum(d) FROM " + table;
+            assertThat(query(dsl, baseSql)).matches("VALUES (BIGINT '3', DOUBLE '7.0')").isFullyPushedDown();
+            assertPushedDownByDsl(dsl, baseSql);
+            String statisticalSql = "SELECT stddev(d) FROM " + table;
+            assertThat(query(dsl, statisticalSql)).isFullyPushedDown();
+            assertPushedDownBySql(dsl, statisticalSql);
+
+            // the default engine answers the base set through SQL
+            assertPushedDownBySql(baseSql);
         }
         finally {
             deleteIndex(table);
@@ -293,7 +333,7 @@ public class TestOpenSearchSqlConnector
     private void assertPredicate(String table, Session unpushedSession, String where, long expectedCount, Double expectedSum)
     {
         String sql = "SELECT count(*), sum(d) FROM " + table + " WHERE " + where;
-        assertPushedDown(sql);
+        assertPushedDownBySql(sql);
 
         MaterializedRow pushed = getOnlyElement(computeActual(sql).getMaterializedRows());
         MaterializedRow unpushed = getOnlyElement(computeActual(unpushedSession, sql).getMaterializedRows());
@@ -302,15 +342,28 @@ public class TestOpenSearchSqlConnector
         assertThat(pushed.getField(1)).as(where).isEqualTo(expectedSum);
     }
 
-    private void assertPushedDown(String sql)
+    // The EXPLAIN output prints the table handle, which names the engine: SQL_AGGREGATION:<index> for the SQL plugin
+    // and AGGREGATION:<index> for search aggregations.
+    private void assertPushedDownBySql(String sql)
     {
-        assertPushedDown(getSession(), sql);
+        assertPushedDownBySql(getSession(), sql);
     }
 
-    private void assertPushedDown(Session session, String sql)
+    private void assertPushedDownBySql(Session session, String sql)
     {
-        String plan = computeActual(session, "EXPLAIN " + sql).getOnlyValue().toString();
-        assertThat(plan).doesNotContain("Aggregate").contains("TableScan");
+        String plan = explain(session, sql);
+        assertThat(plan).doesNotContain("Aggregate").contains("TableScan").contains("SQL_AGGREGATION:");
+    }
+
+    private void assertPushedDownByDsl(Session session, String sql)
+    {
+        String plan = explain(session, sql);
+        assertThat(plan).doesNotContain("Aggregate").contains("TableScan").contains("AGGREGATION:").doesNotContain("SQL_AGGREGATION");
+    }
+
+    private String explain(Session session, String sql)
+    {
+        return computeActual(session, "EXPLAIN " + sql).getOnlyValue().toString();
     }
 
     // docs: (g=a,i=1,d=1.0,l=1), (g=a,i=3,d=2.0,l=2), (g=b,i=10,d=4.0,l=3)

@@ -136,7 +136,7 @@ public class TestSqlAggregationResponseReader
                 .isInstanceOf(TrinoException.class)
                 .hasMessageContaining("expected 8 columns");
 
-        SqlResult noRows = new SqlResult(result(TYPES, 1L, 1L, 1L, 1, 1.0, 1.0, 1L, 1.0, 1L, 1L).schema(), List.of());
+        SqlResult noRows = new SqlResult(result(TYPES, 1L, 1L, 1L, 1, 1.0, 1.0, 1L, 1.0).schema(), List.of());
         assertThatThrownBy(() -> SqlAggregationResponseReader.read(QUERY, noRows))
                 .isInstanceOf(TrinoException.class)
                 .hasMessageContaining("expected one row");
