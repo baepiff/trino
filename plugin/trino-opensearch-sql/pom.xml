@@ -16,6 +16,8 @@
 
     <properties>
         <air.compiler.fail-warnings>true</air.compiler.fail-warnings>
+        <!-- Must match the OpenSearch version used by trino-opensearch -->
+        <dep.opensearch.version>3.8.0</dep.opensearch.version>
     </properties>
 
     <dependencies>
@@ -68,6 +70,12 @@
         <dependency>
             <groupId>jakarta.validation</groupId>
             <artifactId>jakarta.validation-api</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.opensearch</groupId>
+            <artifactId>opensearch</artifactId>
+            <version>${dep.opensearch.version}</version>
         </dependency>
 
         <dependency>

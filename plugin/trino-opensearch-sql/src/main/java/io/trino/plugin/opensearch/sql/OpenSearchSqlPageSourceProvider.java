@@ -14,11 +14,26 @@
 package io.trino.plugin.opensearch.sql;
 
 import com.google.inject.Inject;
+import io.trino.plugin.opensearch.OpenSearchColumnHandle;
 import io.trino.plugin.opensearch.OpenSearchConfig;
 import io.trino.plugin.opensearch.OpenSearchPageSourceProvider;
+import io.trino.plugin.opensearch.OpenSearchTableHandle;
 import io.trino.plugin.opensearch.client.OpenSearchClient;
+import io.trino.spi.connector.ColumnHandle;
+import io.trino.spi.connector.ConnectorPageSource;
+import io.trino.spi.connector.ConnectorSession;
+import io.trino.spi.connector.ConnectorSplit;
+import io.trino.spi.connector.ConnectorTableCredentials;
+import io.trino.spi.connector.ConnectorTableHandle;
+import io.trino.spi.connector.ConnectorTransactionHandle;
+import io.trino.spi.connector.DynamicFilter;
 import io.trino.spi.type.TypeManager;
 
+import java.util.List;
+import java.util.Optional;
+
+import static com.google.common.collect.ImmutableList.toImmutableList;
+import static io.trino.plugin.opensearch.OpenSearchTableHandle.Type.SQL_AGGREGATION;
 import static java.util.Objects.requireNonNull;
 
 public class OpenSearchSqlPageSourceProvider
@@ -33,8 +48,25 @@ public class OpenSearchSqlPageSourceProvider
         this.sqlClient = requireNonNull(sqlClient, "sqlClient is null");
     }
 
-    OpenSearchSqlClient sqlClient()
+    @Override
+    @SuppressWarnings("deprecation") // TODO (https://github.com/trinodb/trino/issues/29959) migrate together with the base class to the non-deprecated createPageSource overload
+    public ConnectorPageSource createPageSource(
+            ConnectorTransactionHandle transaction,
+            ConnectorSession session,
+            ConnectorSplit split,
+            ConnectorTableHandle table,
+            Optional<ConnectorTableCredentials> tableCredentials,
+            List<ColumnHandle> columns,
+            DynamicFilter dynamicFilter)
     {
-        return sqlClient;
+        if (table instanceof OpenSearchTableHandle handle && handle.type() == SQL_AGGREGATION) {
+            return new SqlAggregatePageSource(
+                    sqlClient,
+                    handle,
+                    columns.stream()
+                            .map(OpenSearchColumnHandle.class::cast)
+                            .collect(toImmutableList()));
+        }
+        return super.createPageSource(transaction, session, split, table, tableCredentials, columns, dynamicFilter);
     }
 }
