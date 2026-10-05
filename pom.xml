@@ -208,6 +208,7 @@
         <dep.netty.version>4.2.18.Final</dep.netty.version>
         <dep.okhttp.version>5.5.0</dep.okhttp.version>
         <dep.okio.version>3.18.2</dep.okio.version>
+        <dep.opensearch.version>3.8.0</dep.opensearch.version>
         <dep.parquet.version>1.18.1</dep.parquet.version>
         <dep.protobuf.version>4.36.2</dep.protobuf.version>
         <dep.sis.version>1.6</dep.sis.version>

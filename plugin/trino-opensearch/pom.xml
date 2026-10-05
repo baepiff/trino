@@ -16,7 +16,6 @@
 
     <properties>
         <air.compiler.fail-warnings>true</air.compiler.fail-warnings>
-        <dep.opensearch.version>3.8.0</dep.opensearch.version>
         <!-- Must match the Lucene version used by the opensearch dependency -->
         <dep.lucene.version>10.5.0</dep.lucene.version>
     </properties>
