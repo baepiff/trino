@@ -150,7 +150,9 @@ The following operations stay in Trino:
 
 - Any aggregation with `GROUP BY`, `GROUPING SETS`, `CUBE` or `ROLLUP`. The
   OpenSearch connector pushes supported grouped aggregations down as search
-  aggregations.
+  aggregations. This includes `GROUP BY` on `text` fields through a `keyword`
+  sub-field when `opensearch.text-groupby-pushdown-enabled` is set, with the
+  same verification as in the OpenSearch connector.
 - `min`, `max`, `sum` and `avg` over `BIGINT` columns, unless you enable
   `opensearch.sql.bigint-aggregation-pushdown-enabled`. The statistical
   functions over `BIGINT` columns always stay in Trino. With
