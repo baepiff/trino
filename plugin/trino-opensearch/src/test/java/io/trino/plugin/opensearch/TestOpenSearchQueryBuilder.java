@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.opensearch;
 
+import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.trino.plugin.opensearch.client.IndexMetadata;
@@ -23,6 +24,7 @@ import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.Range;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.predicate.ValueSet;
+import org.intellij.lang.annotations.Language;
 import org.junit.jupiter.api.Test;
 import org.opensearch.index.query.BoolQueryBuilder;
 import org.opensearch.index.query.ExistsQueryBuilder;
@@ -30,14 +32,17 @@ import org.opensearch.index.query.MatchAllQueryBuilder;
 import org.opensearch.index.query.QueryBuilder;
 import org.opensearch.index.query.RangeQueryBuilder;
 import org.opensearch.index.query.TermQueryBuilder;
+import org.opensearch.index.query.TermsQueryBuilder;
 import org.opensearch.search.aggregations.AggregationBuilder;
 import org.opensearch.search.aggregations.AggregationBuilders;
 import org.opensearch.search.aggregations.bucket.composite.CompositeAggregationBuilder;
 import org.opensearch.search.aggregations.bucket.composite.TermsValuesSourceBuilder;
 
+import java.io.IOException;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
 
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.plugin.opensearch.OpenSearchQueryBuilder.buildAggregationQuery;
@@ -46,6 +51,7 @@ import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestOpenSearchQueryBuilder
 {
@@ -53,6 +59,14 @@ public class TestOpenSearchQueryBuilder
     private static final OpenSearchColumnHandle AGE = new OpenSearchColumnHandle(ImmutableList.of("age"), INTEGER, new IndexMetadata.PrimitiveType("int"), new IntegerDecoder.Descriptor("age"), true);
     private static final OpenSearchColumnHandle SCORE = new OpenSearchColumnHandle(ImmutableList.of("score"), DOUBLE, new IndexMetadata.PrimitiveType("double"), new DoubleDecoder.Descriptor("score"), true);
     private static final OpenSearchColumnHandle LENGTH = new OpenSearchColumnHandle(ImmutableList.of("length"), DOUBLE, new IndexMetadata.PrimitiveType("double"), new DoubleDecoder.Descriptor("length"), true);
+    private static final OpenSearchColumnHandle TENANT = new OpenSearchColumnHandle(
+            ImmutableList.of("tenantId"),
+            VARCHAR,
+            new IndexMetadata.PrimitiveType("text"),
+            new VarcharDecoder.Descriptor("tenantId"),
+            false,
+            Optional.of(new IndexMetadata.SubField("keyword", "keyword", OptionalInt.of(20), Optional.empty(), true, false)));
+    private static final JsonMapper JSON_MAPPER = new JsonMapper();
 
     @Test
     public void testMatchAll()
@@ -136,6 +150,63 @@ public class TestOpenSearchQueryBuilder
                 new BoolQueryBuilder()
                         .filter(new TermQueryBuilder(AGE.name(), 10L))
                         .mustNot(new ExistsQueryBuilder(SCORE.name())));
+    }
+
+    @Test
+    public void testTextColumnWithKeywordSubField()
+            throws IOException
+    {
+        // a single value is a term query on the sub-field
+        QueryBuilder single = buildSearchQuery(ImmutableMap.of(TENANT, Domain.singleValue(VARCHAR, utf8Slice("tenant-a"))));
+        assertThat(single).isEqualTo(new BoolQueryBuilder().filter(new TermQueryBuilder("tenantId.keyword", "tenant-a")));
+        assertJson(single,
+                """
+                {"bool": {"filter": [{"term": {"tenantId.keyword": {"value": "tenant-a", "boost": 1.0}}}], "adjust_pure_negative": true, "boost": 1.0}}
+                """);
+
+        // a list is a terms query on the sub-field, in the order of the domain
+        QueryBuilder list = buildSearchQuery(ImmutableMap.of(TENANT, Domain.multipleValues(VARCHAR, ImmutableList.of(utf8Slice("b"), utf8Slice("a")))));
+        assertThat(list).isEqualTo(new BoolQueryBuilder().filter(new TermsQueryBuilder("tenantId.keyword", ImmutableList.of("a", "b"))));
+        assertJson(list,
+                """
+                {"bool": {"filter": [{"terms": {"tenantId.keyword": ["a", "b"], "boost": 1.0}}], "adjust_pure_negative": true, "boost": 1.0}}
+                """);
+
+        // other columns are unaffected
+        QueryBuilder combined = buildSearchQuery(ImmutableMap.of(
+                TENANT, Domain.singleValue(VARCHAR, utf8Slice("a")),
+                AGE, Domain.singleValue(INTEGER, 1L)));
+        assertThat(combined).isEqualTo(new BoolQueryBuilder()
+                .filter(new TermQueryBuilder("tenantId.keyword", "a"))
+                .filter(new TermQueryBuilder(AGE.name(), 1L)));
+    }
+
+    @Test
+    public void testTextColumnRejectsDomainsThatAreNotExact()
+    {
+        // the metadata never pushes these domains, the builder refuses rather than build an inexact query
+        for (Domain domain : List.of(
+                Domain.singleValue(VARCHAR, utf8Slice("a"), true),
+                Domain.onlyNull(VARCHAR),
+                Domain.notNull(VARCHAR),
+                Domain.create(ValueSet.ofRanges(Range.greaterThan(VARCHAR, utf8Slice("a"))), false),
+                Domain.singleValue(VARCHAR, utf8Slice("a".repeat(21))))) {
+            assertThatThrownBy(() -> buildSearchQuery(ImmutableMap.of(TENANT, domain)))
+                    .as(domain.toString())
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("cannot be pushed to the keyword sub-field of tenantId");
+        }
+    }
+
+    private static void assertJson(QueryBuilder actual, @Language("JSON") String expected)
+            throws IOException
+    {
+        assertThat(JSON_MAPPER.readTree(actual.toString())).isEqualTo(JSON_MAPPER.readTree(expected));
+    }
+
+    private static QueryBuilder buildSearchQuery(Map<OpenSearchColumnHandle, Domain> domains)
+    {
+        return OpenSearchQueryBuilder.buildSearchQuery(TupleDomain.withColumnDomains(domains), Optional.empty(), Map.of());
     }
 
     @Test

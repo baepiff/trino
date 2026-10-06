@@ -20,6 +20,7 @@ import com.google.common.net.HostAndPort;
 import io.trino.Session;
 import io.trino.spi.type.VarcharType;
 import io.trino.sql.planner.plan.AggregationNode;
+import io.trino.sql.planner.plan.FilterNode;
 import io.trino.sql.planner.plan.ProjectNode;
 import io.trino.sql.planner.plan.TopNNode;
 import io.trino.sql.query.QueryAssertions;
@@ -1464,6 +1465,150 @@ public abstract class BaseOpenSearchConnectorTest
                 "WHERE keyword_column LIKE 'При%'"))
                 .matches("VALUES VARCHAR 'Привет'")
                 .isFullyPushedDown();
+    }
+
+    @Test
+    public void testTextFieldWithKeywordSubFieldPredicatePushdown()
+            throws IOException
+    {
+        String tableName = "test_text_keyword_pushdown_" + randomNameSuffix();
+        @Language("JSON")
+        String properties =
+                """
+                {
+                    "properties": {
+                        "id": { "type": "integer" },
+                        "tenant": { "type": "text", "fields": { "keyword": { "type": "keyword", "ignore_above": 20 } } }
+                    }
+                }
+                """;
+
+        createIndex(tableName, properties);
+        try {
+            String longValue = "tenant-a-with-a-long-identifier";
+            assertThat(longValue.length()).isGreaterThan(20);
+            index(tableName, ImmutableMap.of("id", 1, "tenant", "tenant-a"));
+            index(tableName, ImmutableMap.of("id", 2, "tenant", "tenant-a"));
+            index(tableName, ImmutableMap.of("id", 3, "tenant", "Tenant-A"));
+            index(tableName, ImmutableMap.of("id", 4, "tenant", "tenant-b"));
+            index(tableName, ImmutableMap.of("id", 5, "tenant", longValue));
+            index(tableName, ImmutableMap.of("id", 6));
+            Map<String, Object> nullTenant = new HashMap<>();
+            nullTenant.put("id", 7);
+            nullTenant.put("tenant", null);
+            index(tableName, nullTenant);
+            index(tableName, ImmutableMap.of("id", 8, "tenant", ""));
+            index(tableName, ImmutableMap.of("id", 9, "tenant", "tenant a"));
+
+            // equality is answered by the keyword sub-field; isFullyPushedDown also compares with the results computed by Trino
+            assertThat(query("SELECT id FROM " + tableName + " WHERE tenant = 'tenant-a'"))
+                    .matches("VALUES 1, 2")
+                    .isFullyPushedDown();
+            // case-sensitive like Trino, and not matched token by token like the text field
+            assertThat(query("SELECT id FROM " + tableName + " WHERE tenant = 'Tenant-A'"))
+                    .matches("VALUES 3")
+                    .isFullyPushedDown();
+            assertThat(query("SELECT id FROM " + tableName + " WHERE tenant = 'tenant a'"))
+                    .matches("VALUES 9")
+                    .isFullyPushedDown();
+            assertThat(query("SELECT id FROM " + tableName + " WHERE tenant = ''"))
+                    .matches("VALUES 8")
+                    .isFullyPushedDown();
+            assertThat(query("SELECT id FROM " + tableName + " WHERE tenant IN ('tenant-a', 'tenant-b', 'no-such-tenant')"))
+                    .matches("VALUES 1, 2, 4")
+                    .isFullyPushedDown();
+            assertThat(query("SELECT id FROM " + tableName + " WHERE tenant = 'no-such-tenant'"))
+                    .returnsEmptyResult()
+                    .isFullyPushedDown();
+            // aggregations over the pushed filter are pushed as well
+            assertThat(query("SELECT count(*) FROM " + tableName + " WHERE tenant = 'tenant-a'"))
+                    .matches("VALUES BIGINT '2'")
+                    .isFullyPushedDown();
+            assertThat(query("SELECT count(*), max(id) FROM " + tableName + " WHERE tenant IN ('tenant-a', 'tenant-b')"))
+                    .matches("VALUES (BIGINT '3', 4)")
+                    .isFullyPushedDown();
+
+            // the sub-field does not index values longer than ignore_above, so these predicates stay in Trino
+            assertThat(query("SELECT id FROM " + tableName + " WHERE tenant = '" + longValue + "'"))
+                    .matches("VALUES 5")
+                    .isNotFullyPushedDown(FilterNode.class);
+            assertThat(query("SELECT id FROM " + tableName + " WHERE tenant IN ('tenant-a', '" + longValue + "')"))
+                    .matches("VALUES 1, 2, 5")
+                    .isNotFullyPushedDown(FilterNode.class);
+            assertThat(query("SELECT count(*) FROM " + tableName + " WHERE tenant = '" + longValue + "'"))
+                    .matches("VALUES BIGINT '1'")
+                    .isNotFullyPushedDown(FilterNode.class);
+            // ranges, inequality and null checks stay in Trino
+            assertThat(query("SELECT id FROM " + tableName + " WHERE tenant <> 'tenant-a'"))
+                    .matches("VALUES 3, 4, 5, 8, 9")
+                    .isNotFullyPushedDown(FilterNode.class);
+            assertThat(query("SELECT id FROM " + tableName + " WHERE tenant > 'tenant-a'"))
+                    .matches("VALUES 4, 5")
+                    .isNotFullyPushedDown(FilterNode.class);
+            assertThat(query("SELECT id FROM " + tableName + " WHERE tenant IS NULL"))
+                    .matches("VALUES 6, 7")
+                    .isNotFullyPushedDown(FilterNode.class);
+            assertThat(query("SELECT id FROM " + tableName + " WHERE tenant IS NOT NULL AND id > 7"))
+                    .matches("VALUES 8, 9")
+                    .isNotFullyPushedDown(FilterNode.class);
+            assertThat(query("SELECT id FROM " + tableName + " WHERE tenant = 'tenant-a' OR tenant IS NULL"))
+                    .matches("VALUES 1, 2, 6, 7")
+                    .isNotFullyPushedDown(FilterNode.class);
+            assertThat(query("SELECT id FROM " + tableName + " WHERE tenant LIKE 'tenant-%'"))
+                    .matches("VALUES 1, 2, 4, 5")
+                    .isNotFullyPushedDown(FilterNode.class);
+            // a pushable and an unpushable predicate on the same column
+            assertThat(query("SELECT id FROM " + tableName + " WHERE tenant IN ('tenant-a', 'tenant-b') AND tenant LIKE '%b'"))
+                    .matches("VALUES 4")
+                    .isNotFullyPushedDown(FilterNode.class);
+        }
+        finally {
+            deleteIndex(tableName);
+        }
+    }
+
+    @Test
+    public void testTextFieldWithUnsuitableSubFieldsPredicateIsNotPushedDown()
+            throws IOException
+    {
+        String tableName = "test_text_normalized_keyword_" + randomNameSuffix();
+        @Language("JSON")
+        String settings =
+                """
+                {
+                    "settings": {
+                        "analysis": { "normalizer": { "lower": { "type": "custom", "filter": ["lowercase"] } } }
+                    },
+                    "mappings": {
+                        "properties": {
+                            "id": { "type": "integer" },
+                            "normalized": { "type": "text", "fields": { "keyword": { "type": "keyword", "normalizer": "lower" } } },
+                            "analyzed": { "type": "text", "fields": { "english": { "type": "text", "analyzer": "english" } } },
+                            "plain": { "type": "text" }
+                        }
+                    }
+                }
+                """;
+        Request request = new Request("PUT", "/" + tableName);
+        request.setJsonEntity(settings);
+        client.getLowLevelClient().performRequest(request);
+        try {
+            index(tableName, ImmutableMap.of("id", 1, "normalized", "tenant-a", "analyzed", "tenant-a", "plain", "tenant-a"));
+            index(tableName, ImmutableMap.of("id", 2, "normalized", "Tenant-A", "analyzed", "Tenant-A", "plain", "Tenant-A"));
+
+            // a lower-case normalizer would also match 'Tenant-A', so the case-sensitive comparison stays in Trino
+            for (String column : List.of("normalized", "analyzed", "plain")) {
+                assertThat(query("SELECT id FROM " + tableName + " WHERE " + column + " = 'tenant-a'"))
+                        .matches("VALUES 1")
+                        .isNotFullyPushedDown(FilterNode.class);
+                assertThat(query("SELECT id FROM " + tableName + " WHERE " + column + " IN ('Tenant-A', 'x')"))
+                        .matches("VALUES 2")
+                        .isNotFullyPushedDown(FilterNode.class);
+            }
+        }
+        finally {
+            deleteIndex(tableName);
+        }
     }
 
     @Test
