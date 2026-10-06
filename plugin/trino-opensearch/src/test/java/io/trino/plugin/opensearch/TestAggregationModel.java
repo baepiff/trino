@@ -126,6 +126,35 @@ public class TestAggregationModel
     }
 
     @Test
+    public void testBigintIsAcceptedOnlyWhenRequested()
+    {
+        OpenSearchColumnHandle bigint = bigintColumn("regionkey");
+        Map<String, ColumnHandle> assignments = Map.of("regionkey", bigint);
+        for (String name : List.of("min", "max", "sum", "avg")) {
+            Type outputType = name.equals("avg") ? DOUBLE : BIGINT;
+            AggregateFunction function = function(name, outputType, "regionkey", BIGINT);
+            assertThat(MetricAggregation.from(function, assignments, "a", MetricAggregation.DEFAULT_FUNCTIONS, false)).as(name + " flag off").isEmpty();
+            assertThat(MetricAggregation.from(function, assignments, "a", MetricAggregation.SQL_FUNCTIONS)).as(name + " default overload").isEmpty();
+            assertThat(MetricAggregation.from(function, assignments, "a", MetricAggregation.DEFAULT_FUNCTIONS, true)).as(name + " flag on")
+                    .hasValue(new MetricAggregation(name, outputType, Optional.of(bigint), "a"));
+        }
+    }
+
+    @Test
+    public void testBigintFlagDoesNotAcceptStatisticalFunctionsOrUnsupportedColumns()
+    {
+        Map<String, ColumnHandle> assignments = Map.of(
+                "b", bigintColumn("b"),
+                "r", column("r", REAL, "float", true));
+
+        for (String name : List.of("stddev", "stddev_samp", "stddev_pop", "variance", "var_samp", "var_pop")) {
+            assertThat(MetricAggregation.from(function(name, DOUBLE, "b", BIGINT), assignments, "a", MetricAggregation.SQL_FUNCTIONS, true)).as(name).isEmpty();
+        }
+        // the flag does not widen the other input types
+        assertThat(MetricAggregation.from(function("sum", REAL, "r", REAL), assignments, "a", MetricAggregation.SQL_FUNCTIONS, true)).isEmpty();
+    }
+
+    @Test
     public void testStatisticalFunctionsOnlyThroughSqlFunctionSet()
     {
         OpenSearchColumnHandle doubleColumn = column("d", DOUBLE, "double", true);

@@ -43,6 +43,7 @@ import static io.trino.plugin.opensearch.MetricAggregation.canonicalFunctionName
 import static io.trino.plugin.opensearch.OpenSearchSessionProperties.isAggregationPushdownEnabled;
 import static io.trino.plugin.opensearch.OpenSearchTableHandle.Type.SCAN;
 import static io.trino.plugin.opensearch.sql.OpenSearchSqlSessionProperties.globalAggregationEngine;
+import static io.trino.plugin.opensearch.sql.OpenSearchSqlSessionProperties.isBigintAggregationPushdownEnabled;
 import static io.trino.plugin.opensearch.sql.OpenSearchSqlSessionProperties.isStatisticalPushdownEnabled;
 
 public class OpenSearchSqlMetadata
@@ -97,6 +98,9 @@ public class OpenSearchSqlMetadata
             return Optional.empty();
         }
 
+        // BIGINT inputs are only pushed through the SQL engine, where the response reader guards the precision of the result
+        boolean allowBigint = isBigintAggregationPushdownEnabled(session) && globalAggregationEngine(session) == GlobalAggregationEngine.SQL;
+
         Optional<String> whereClause = SqlWhereRenderer.render(handle.constraint().transformKeys(OpenSearchColumnHandle.class::cast));
         if (whereClause.isEmpty()) {
             return Optional.empty();
@@ -109,7 +113,7 @@ public class OpenSearchSqlMetadata
             AggregateFunction function = aggregates.get(index);
             String name = SYNTHETIC_COLUMN_NAME_PREFIX + index;
 
-            Optional<MetricAggregation> metricAggregation = MetricAggregation.from(function, assignments, name, SQL_FUNCTIONS);
+            Optional<MetricAggregation> metricAggregation = MetricAggregation.from(function, assignments, name, SQL_FUNCTIONS, allowBigint);
             Optional<OpenSearchColumnHandle> outputColumn = aggregationOutputColumn(name, function.getOutputType());
             if (metricAggregation.isEmpty() || outputColumn.isEmpty()) {
                 return Optional.empty();

@@ -24,6 +24,7 @@ import java.util.Optional;
 import java.util.Set;
 
 import static io.trino.plugin.opensearch.PushdownColumns.isDocValuesPushdownSupported;
+import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.RealType.REAL;
@@ -66,6 +67,15 @@ public record MetricAggregation(String functionName, Type outputType, Optional<O
 
     public static Optional<MetricAggregation> from(AggregateFunction function, Map<String, ColumnHandle> assignments, String alias, Set<String> allowedFunctions)
     {
+        return from(function, assignments, alias, allowedFunctions, false);
+    }
+
+    /**
+     * @param allowBigintInput accept BIGINT input columns for min, max, sum and avg. OpenSearch computes these with doubles, so the
+     *         caller must be able to detect results that are not exact (magnitude of 2^53 or more). Statistical functions never accept BIGINT.
+     */
+    public static Optional<MetricAggregation> from(AggregateFunction function, Map<String, ColumnHandle> assignments, String alias, Set<String> allowedFunctions, boolean allowBigintInput)
+    {
         if (function.isDistinct() || function.getFilter().isPresent() || !function.getSortItems().isEmpty()) {
             return Optional.empty();
         }
@@ -84,7 +94,7 @@ public record MetricAggregation(String functionName, Type outputType, Optional<O
         }
         if (!(assignments.get(variable.getName()) instanceof OpenSearchColumnHandle column)
                 || !isDocValuesPushdownSupported(column)
-                || !isSupportedInput(functionName, column.type())) {
+                || !isSupportedInput(functionName, column.type(), allowBigintInput)) {
             return Optional.empty();
         }
         return Optional.of(new MetricAggregation(functionName, function.getOutputType(), Optional.of(column), alias));
@@ -99,16 +109,17 @@ public record MetricAggregation(String functionName, Type outputType, Optional<O
         };
     }
 
-    private static boolean isSupportedInput(String functionName, Type inputType)
+    private static boolean isSupportedInput(String functionName, Type inputType, boolean allowBigintInput)
     {
         return switch (functionName) {
             // value_count works on any field type that supports predicates
             case COUNT -> true;
-            // BIGINT is excluded: metric aggregations return doubles, so values above 2^53 lose precision
-            case MIN, MAX -> inputType.equals(TINYINT) || inputType.equals(SMALLINT) || inputType.equals(INTEGER) || inputType.equals(REAL) || inputType.equals(DOUBLE);
+            // BIGINT is excluded unless the caller opts in: metric aggregations return doubles, so values above 2^53 lose precision
+            case MIN, MAX -> (allowBigintInput && inputType.equals(BIGINT)) || inputType.equals(TINYINT) || inputType.equals(SMALLINT) || inputType.equals(INTEGER) || inputType.equals(REAL) || inputType.equals(DOUBLE);
             // REAL is excluded: OpenSearch accumulates in double while Trino accumulates in single precision
             // The integer input types are not reachable today: Trino plans sum and avg over them on a CAST to BIGINT or DOUBLE, which is never pushed down
-            case SUM, AVG, STDDEV_SAMP, STDDEV_POP, VAR_SAMP, VAR_POP -> inputType.equals(TINYINT) || inputType.equals(SMALLINT) || inputType.equals(INTEGER) || inputType.equals(DOUBLE);
+            case SUM, AVG -> (allowBigintInput && inputType.equals(BIGINT)) || inputType.equals(TINYINT) || inputType.equals(SMALLINT) || inputType.equals(INTEGER) || inputType.equals(DOUBLE);
+            case STDDEV_SAMP, STDDEV_POP, VAR_SAMP, VAR_POP -> inputType.equals(TINYINT) || inputType.equals(SMALLINT) || inputType.equals(INTEGER) || inputType.equals(DOUBLE);
             default -> false;
         };
     }

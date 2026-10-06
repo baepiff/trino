@@ -30,6 +30,7 @@ public final class OpenSearchSqlSessionProperties
 {
     public static final String GLOBAL_AGGREGATION_ENGINE = "global_aggregation_engine";
     public static final String STATISTICAL_PUSHDOWN_ENABLED = "statistical_pushdown_enabled";
+    public static final String BIGINT_AGGREGATION_PUSHDOWN_ENABLED = "bigint_aggregation_pushdown_enabled";
 
     private final List<PropertyMetadata<?>> sessionProperties;
 
@@ -48,6 +49,11 @@ public final class OpenSearchSqlSessionProperties
                         "Push down stddev, variance and related functions to the OpenSearch SQL plugin, which can lose precision for large values with a small spread",
                         config.isStatisticalPushdownEnabled(),
                         false))
+                .add(booleanProperty(
+                        BIGINT_AGGREGATION_PUSHDOWN_ENABLED,
+                        "Push down min, max, sum and avg over BIGINT columns to the OpenSearch SQL plugin, which computes them with double precision and fails the query when a min, max or sum result has a magnitude of 2^53 or more",
+                        config.isBigintAggregationPushdownEnabled(),
+                        false))
                 .build();
     }
 
@@ -60,6 +66,11 @@ public final class OpenSearchSqlSessionProperties
     public static GlobalAggregationEngine globalAggregationEngine(ConnectorSession session)
     {
         return session.getProperty(GLOBAL_AGGREGATION_ENGINE, GlobalAggregationEngine.class);
+    }
+
+    public static boolean isBigintAggregationPushdownEnabled(ConnectorSession session)
+    {
+        return session.getProperty(BIGINT_AGGREGATION_PUSHDOWN_ENABLED, Boolean.class);
     }
 
     public static boolean isStatisticalPushdownEnabled(ConnectorSession session)

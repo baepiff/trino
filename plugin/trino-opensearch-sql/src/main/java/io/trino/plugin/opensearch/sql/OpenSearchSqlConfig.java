@@ -27,6 +27,7 @@ public class OpenSearchSqlConfig
 
     private GlobalAggregationEngine globalAggregationEngine = GlobalAggregationEngine.SQL;
     private boolean statisticalPushdownEnabled;
+    private boolean bigintAggregationPushdownEnabled;
 
     @NotNull
     public GlobalAggregationEngine getGlobalAggregationEngine()
@@ -39,6 +40,19 @@ public class OpenSearchSqlConfig
     public OpenSearchSqlConfig setGlobalAggregationEngine(GlobalAggregationEngine globalAggregationEngine)
     {
         this.globalAggregationEngine = globalAggregationEngine;
+        return this;
+    }
+
+    public boolean isBigintAggregationPushdownEnabled()
+    {
+        return bigintAggregationPushdownEnabled;
+    }
+
+    @Config("opensearch.sql.bigint-aggregation-pushdown-enabled")
+    @ConfigDescription("Push down min, max, sum and avg over BIGINT columns to the OpenSearch SQL plugin. The plugin computes them with double precision, which is exact only up to 2^53, so a min, max or sum result with a magnitude of 2^53 or more fails the query instead of returning a possibly inexact value. Only applies to the SQL engine")
+    public OpenSearchSqlConfig setBigintAggregationPushdownEnabled(boolean bigintAggregationPushdownEnabled)
+    {
+        this.bigintAggregationPushdownEnabled = bigintAggregationPushdownEnabled;
         return this;
     }
 

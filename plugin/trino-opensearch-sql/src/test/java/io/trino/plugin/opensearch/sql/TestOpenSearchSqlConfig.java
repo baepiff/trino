@@ -30,7 +30,8 @@ public class TestOpenSearchSqlConfig
     {
         assertRecordedDefaults(recordDefaults(OpenSearchSqlConfig.class)
                 .setGlobalAggregationEngine(GlobalAggregationEngine.SQL)
-                .setStatisticalPushdownEnabled(false));
+                .setStatisticalPushdownEnabled(false)
+                .setBigintAggregationPushdownEnabled(false));
     }
 
     @Test
@@ -38,11 +39,13 @@ public class TestOpenSearchSqlConfig
     {
         Map<String, String> properties = ImmutableMap.of(
                 "opensearch.sql.global-aggregation-engine", "DSL",
-                "opensearch.sql.statistical-pushdown-enabled", "true");
+                "opensearch.sql.statistical-pushdown-enabled", "true",
+                "opensearch.sql.bigint-aggregation-pushdown-enabled", "true");
 
         OpenSearchSqlConfig expected = new OpenSearchSqlConfig()
                 .setGlobalAggregationEngine(GlobalAggregationEngine.DSL)
-                .setStatisticalPushdownEnabled(true);
+                .setStatisticalPushdownEnabled(true)
+                .setBigintAggregationPushdownEnabled(true);
 
         assertFullMapping(properties, expected);
     }

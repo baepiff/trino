@@ -16,11 +16,13 @@ package io.trino.plugin.opensearch.sql;
 import io.trino.plugin.opensearch.MetricAggregation;
 import io.trino.plugin.opensearch.OpenSearchColumnHandle;
 import io.trino.plugin.opensearch.client.IndexMetadata;
+import io.trino.plugin.opensearch.decoders.BigintDecoder;
 import io.trino.plugin.opensearch.decoders.DoubleDecoder;
 import io.trino.plugin.opensearch.decoders.IntegerDecoder;
 import io.trino.spi.TrinoException;
 import org.junit.jupiter.api.Test;
 
+import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -28,6 +30,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+import static io.trino.plugin.opensearch.OpenSearchErrorCode.OPENSEARCH_QUERY_FAILURE;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
@@ -51,6 +54,25 @@ public class TestSqlAggregationResponseReader
 
     // columns: count(*) (also the sentinel), sum, count, min, avg, stddev_pop, count, var_samp
     private static final List<String> TYPES = List.of("long", "long", "long", "integer", "double", "double", "long", "double");
+
+    private static final OpenSearchColumnHandle TENANT = new OpenSearchColumnHandle(List.of("tenantId"), BIGINT, new IndexMetadata.PrimitiveType("long"), new BigintDecoder.Descriptor("tenantId"), true);
+
+    private static final SqlAggregationQuery BIGINT_QUERY = SqlAggregationQueryBuilder.build("metric_logs", List.of(
+            new MetricAggregation("min", BIGINT, Optional.of(TENANT), "a0"),
+            new MetricAggregation("max", BIGINT, Optional.of(TENANT), "a1"),
+            new MetricAggregation("sum", BIGINT, Optional.of(TENANT), "a2"),
+            new MetricAggregation("avg", DOUBLE, Optional.of(TENANT), "a3")), "").orElseThrow();
+
+    // columns: min, max, sum, count (companion of sum), avg, count(*) (the sentinel)
+    private static SqlResult bigintResult(Object min, Object max, Object sum, Object avg)
+    {
+        return bigintResult(min, max, sum, avg, 2L);
+    }
+
+    private static SqlResult bigintResult(Object min, Object max, Object sum, Object avg, long count)
+    {
+        return result(List.of("long", "long", "long", "long", "double", "long"), min, max, sum, count, avg, count);
+    }
 
     private static SqlResult result(List<String> types, Object... row)
     {
@@ -171,6 +193,71 @@ public class TestSqlAggregationResponseReader
         Map<String, Object> values = SqlAggregationResponseReader.read(QUERY, result(TYPES, large, 55L, large, 1, 5.5, 2.5, large, 7.0));
 
         assertThat(values).containsEntry("a0", large);
+    }
+
+    @Test
+    public void testBigintGuardAcceptsValuesBelowTwoToThe53()
+    {
+        long below = (1L << 53) - 1;
+
+        for (Object value : List.of(below, -below, 0L, (double) below, BigInteger.valueOf(below))) {
+            Map<String, Object> values = SqlAggregationResponseReader.read(BIGINT_QUERY, bigintResult(value, value, value, 1.5));
+
+            assertThat(values).containsEntry("a0", value).containsEntry("a1", value).containsEntry("a2", value).containsEntry("a3", 1.5);
+        }
+    }
+
+    @Test
+    public void testBigintGuardRejectsMinMaxAndSumAtOrAboveTwoToThe53()
+    {
+        long limit = 1L << 53;
+
+        for (Object value : List.of(limit, limit + 1, -limit, -limit - 1, Long.MAX_VALUE, Long.MIN_VALUE, (double) limit, -(double) limit, 1e300, BigInteger.valueOf(limit), BigInteger.TWO.pow(70).negate())) {
+            assertThatThrownBy(() -> SqlAggregationResponseReader.read(BIGINT_QUERY, bigintResult(value, 1L, 1L, 1.5)))
+                    .as("min %s", value.getClass().getSimpleName())
+                    .isInstanceOf(TrinoException.class)
+                    .hasMessageContaining("min over BIGINT column 'tenantId'");
+            assertThatThrownBy(() -> SqlAggregationResponseReader.read(BIGINT_QUERY, bigintResult(1L, value, 1L, 1.5)))
+                    .as("max %s", value.getClass().getSimpleName())
+                    .isInstanceOf(TrinoException.class)
+                    .hasMessageContaining("max over BIGINT column 'tenantId'");
+            assertThatThrownBy(() -> SqlAggregationResponseReader.read(BIGINT_QUERY, bigintResult(1L, 1L, value, 1.5)))
+                    .as("sum %s", value.getClass().getSimpleName())
+                    .isInstanceOf(TrinoException.class)
+                    .hasMessageContaining("sum over BIGINT column 'tenantId'");
+        }
+    }
+
+    @Test
+    public void testBigintGuardMessageNamesTheSettingAndHasNoValue()
+    {
+        assertThatThrownBy(() -> SqlAggregationResponseReader.read(BIGINT_QUERY, bigintResult(1L, 9007199254740993L, 1L, 1.5)))
+                .isInstanceOf(TrinoException.class)
+                .hasMessageContaining("opensearch.sql.bigint-aggregation-pushdown-enabled=false")
+                .hasMessageContaining("bigint_aggregation_pushdown_enabled")
+                .hasMessageNotContaining("9007199254740993")
+                .hasMessageNotContaining("9.007199254740992E15")
+                .satisfies(exception -> assertThat(((TrinoException) exception).getErrorCode()).isEqualTo(OPENSEARCH_QUERY_FAILURE.toErrorCode()));
+    }
+
+    @Test
+    public void testBigintGuardDoesNotCoverAvgNullOrOtherTypes()
+    {
+        // avg is a double in Trino as well
+        Map<String, Object> values = SqlAggregationResponseReader.read(BIGINT_QUERY, bigintResult(1L, 1L, 1L, 1.0e18));
+        assertThat(values).containsEntry("a3", 1.0e18);
+
+        // NULL results of an empty input pass: the sum is NULL because its companion count is 0
+        Map<String, Object> expected = new HashMap<>();
+        expected.put("a0", null);
+        expected.put("a1", null);
+        expected.put("a2", null);
+        expected.put("a3", null);
+        assertThat(SqlAggregationResponseReader.read(BIGINT_QUERY, bigintResult(null, null, null, null, 0L))).isEqualTo(expected);
+
+        // the INTEGER and DOUBLE inputs of the other tests are not guarded
+        Map<String, Object> large = SqlAggregationResponseReader.read(QUERY, result(TYPES, 10L, 1L << 60, 10L, 1, 5.5, 2.5, 10L, 7.0));
+        assertThat(large).containsEntry("a1", 1L << 60);
     }
 
     @Test

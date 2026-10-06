@@ -18,23 +18,31 @@ import io.trino.plugin.opensearch.MetricAggregation;
 import io.trino.plugin.opensearch.sql.SqlAggregationQuery.Output;
 import io.trino.spi.TrinoException;
 
+import java.math.BigInteger;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
 import static io.trino.plugin.opensearch.MetricAggregation.COUNT;
+import static io.trino.plugin.opensearch.MetricAggregation.MAX;
+import static io.trino.plugin.opensearch.MetricAggregation.MIN;
 import static io.trino.plugin.opensearch.MetricAggregation.STATISTICAL_FUNCTIONS;
 import static io.trino.plugin.opensearch.MetricAggregation.STDDEV_POP;
 import static io.trino.plugin.opensearch.MetricAggregation.SUM;
 import static io.trino.plugin.opensearch.MetricAggregation.VAR_POP;
 import static io.trino.plugin.opensearch.OpenSearchErrorCode.OPENSEARCH_QUERY_FAILURE;
+import static io.trino.spi.type.BigintType.BIGINT;
 import static java.lang.String.format;
 
 final class SqlAggregationResponseReader
 {
     // the V2 engine reports count as integer (observed on OpenSearch 2.19) or long, the legacy engine as double
     private static final Set<String> COUNT_TYPES = ImmutableSet.of("integer", "long");
+
+    // integers are exactly representable as doubles only below this magnitude
+    private static final long TWO_POW_53 = 1L << 53;
+    private static final Set<String> GUARDED_FUNCTIONS = ImmutableSet.of(MIN, MAX, SUM);
 
     private SqlAggregationResponseReader() {}
 
@@ -67,13 +75,49 @@ final class SqlAggregationResponseReader
             if (output.countIndex().isPresent()) {
                 int countIndex = output.countIndex().orElseThrow();
                 long count = countValue(result, countIndex, row.get(countIndex));
-                values.put(aggregation.alias(), companionValue(function, count, value));
+                Object companion = companionValue(function, count, value);
+                checkBigintPrecision(aggregation, companion);
+                values.put(aggregation.alias(), companion);
                 continue;
             }
 
+            checkBigintPrecision(aggregation, value);
             values.put(aggregation.alias(), value);
         }
         return values;
+    }
+
+    // OpenSearch computes min, max and sum with doubles, which represent integers exactly only up to 2^53.
+    // avg is a double in Trino as well, so it is not guarded. The check covers the final value only: a sum over values
+    // of mixed signs can round in an intermediate step and still end below the limit.
+    private static void checkBigintPrecision(MetricAggregation aggregation, Object value)
+    {
+        String function = aggregation.functionName();
+        if (value == null || !GUARDED_FUNCTIONS.contains(function) || !aggregation.columnHandle().orElseThrow().type().equals(BIGINT)) {
+            return;
+        }
+        if (exceedsExactDoubleRange(value)) {
+            throw new TrinoException(OPENSEARCH_QUERY_FAILURE, format(
+                    "OpenSearch SQL returned %s over BIGINT column '%s' with magnitude >= 2^53; OpenSearch computes this with double precision so the result may be inexact. "
+                            + "Add a filter, or set opensearch.sql.bigint-aggregation-pushdown-enabled=false (session: bigint_aggregation_pushdown_enabled) to compute it exactly in Trino.",
+                    function,
+                    aggregation.columnHandle().orElseThrow().name()));
+        }
+    }
+
+    private static boolean exceedsExactDoubleRange(Object value)
+    {
+        if (value instanceof Long number) {
+            return number >= TWO_POW_53 || number <= -TWO_POW_53;
+        }
+        if (value instanceof BigInteger number) {
+            return number.abs().compareTo(BigInteger.valueOf(TWO_POW_53)) >= 0;
+        }
+        if (value instanceof Number number) {
+            double doubleValue = number.doubleValue();
+            return Double.isNaN(doubleValue) || Math.abs(doubleValue) >= TWO_POW_53;
+        }
+        return false;
     }
 
     private static Object companionValue(String function, long count, Object value)

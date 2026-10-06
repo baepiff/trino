@@ -36,6 +36,7 @@ import static io.trino.plugin.opensearch.sql.OpenSearchServer.OPENSEARCH_IMAGE;
 import static io.trino.plugin.opensearch.sql.RestClientUtils.createClient;
 import static io.trino.testing.TestingNames.randomNameSuffix;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.within;
 import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
 
@@ -85,7 +86,7 @@ public class TestOpenSearchSqlConnector
         createIndex(warmUpIndex, MAPPING);
         try {
             index(warmUpIndex, ImmutableMap.of("g", "a", "i", 1, "d", 1.0, "l", 1));
-            for (String function : List.of("count(*)", "count(`i`)", "min(`i`)", "max(`i`)", "sum(`d`)", "avg(`d`)", "stddev_samp(`d`)", "stddev_pop(`d`)", "var_samp(`d`)", "var_pop(`d`)")) {
+            for (String function : List.of("count(*)", "count(`i`)", "min(`i`)", "max(`i`)", "min(`l`)", "max(`l`)", "sum(`l`)", "avg(`l`)", "sum(`d`)", "avg(`d`)", "stddev_samp(`d`)", "stddev_pop(`d`)", "var_samp(`d`)", "var_pop(`d`)")) {
                 Request request = new Request("POST", "/_plugins/_sql");
                 request.setJsonEntity(JSON_MAPPER.writeValueAsString(ImmutableMap.of("query", "SELECT %s FROM `%s`".formatted(function, warmUpIndex))));
                 client.getLowLevelClient().performRequest(request);
@@ -383,6 +384,94 @@ public class TestOpenSearchSqlConnector
         }
     }
 
+    @Test
+    public void testBigintAggregatesAreComputedByTrinoByDefault()
+            throws IOException
+    {
+        String table = createStandardIndex();
+        try {
+            String sql = "SELECT sum(l), min(l), max(l), avg(l) FROM " + table;
+            assertThat(query(sql))
+                    .matches("VALUES (BIGINT '6', BIGINT '1', BIGINT '3', DOUBLE '2.0')")
+                    .isNotFullyPushedDown(AggregationNode.class);
+            assertThat(explain(getSession(), sql)).contains("Aggregate").doesNotContain("AGGREGATION:");
+        }
+        finally {
+            deleteIndex(table);
+        }
+    }
+
+    @Test
+    public void testBigintAggregatesArePushedWhenEnabled()
+            throws IOException
+    {
+        String table = createStandardIndex();
+        try {
+            Session bigint = bigintPushdownSession();
+            String sql = "SELECT sum(l), min(l), max(l), avg(l) FROM " + table;
+            assertThat(query(bigint, sql))
+                    .matches("VALUES (BIGINT '6', BIGINT '1', BIGINT '3', DOUBLE '2.0')")
+                    .isFullyPushedDown();
+            assertPushedDownBySql(bigint, sql);
+
+            String filtered = "SELECT count(*), sum(l), min(l), max(l), avg(l) FROM " + table + " WHERE g = 'a'";
+            assertThat(query(bigint, filtered)).matches("VALUES (BIGINT '2', BIGINT '3', BIGINT '1', BIGINT '2', DOUBLE '1.5')").isFullyPushedDown();
+            assertPushedDownBySql(bigint, filtered);
+
+            // empty input: count is 0 and the other aggregates are NULL
+            String empty = "SELECT count(*), sum(l), min(l), max(l), avg(l) FROM " + table + " WHERE g = 'no_such_value'";
+            assertThat(query(bigint, empty))
+                    .matches("VALUES (BIGINT '0', CAST(NULL AS BIGINT), CAST(NULL AS BIGINT), CAST(NULL AS BIGINT), CAST(NULL AS DOUBLE))")
+                    .isFullyPushedDown();
+            assertPushedDownBySql(bigint, empty);
+
+            // mixed with other column types
+            String mixed = "SELECT count(*), sum(l), max(i), sum(d) FROM " + table;
+            assertThat(query(bigint, mixed)).matches("VALUES (BIGINT '3', BIGINT '6', INTEGER '10', DOUBLE '7.0')").isFullyPushedDown();
+            assertPushedDownBySql(bigint, mixed);
+
+            // statistical functions over BIGINT stay in Trino
+            assertThat(explain(statisticalAndBigintPushdownSession(), "SELECT stddev(l) FROM " + table)).contains("Aggregate").doesNotContain("AGGREGATION:");
+
+            // the DSL engine does not push BIGINT
+            Session dsl = Session.builder(bigint)
+                    .setCatalogSessionProperty(CATALOG, "global_aggregation_engine", "DSL")
+                    .build();
+            assertThat(explain(dsl, sql)).contains("Aggregate").doesNotContain("AGGREGATION:");
+        }
+        finally {
+            deleteIndex(table);
+        }
+    }
+
+    // OpenSearch computes these aggregates with doubles: 2^53 + 1 cannot be represented, so the connector refuses to return a result of that size
+    @Test
+    public void testBigintAggregatesAboveTwoToThe53FailLoudly()
+            throws IOException
+    {
+        String table = "test_sql_bigint_large_" + randomNameSuffix();
+        createIndex(table, MAPPING);
+        try {
+            index(table, ImmutableMap.of("g", "a", "l", 9007199254740993L));
+            index(table, ImmutableMap.of("g", "a", "l", 1L));
+
+            Session bigint = bigintPushdownSession();
+            String guardMessage = "with magnitude >= 2^53";
+            assertThatThrownBy(() -> computeActual(bigint, "SELECT max(l) FROM " + table)).hasMessageContaining("max over BIGINT column 'l'").hasMessageContaining(guardMessage);
+            assertThatThrownBy(() -> computeActual(bigint, "SELECT sum(l) FROM " + table)).hasMessageContaining("sum over BIGINT column 'l'").hasMessageContaining(guardMessage);
+            // results below the limit are exact even when an input is above it
+            assertThat(query(bigint, "SELECT min(l) FROM " + table)).matches("VALUES BIGINT '1'");
+            // a filter that excludes the large value avoids the failure
+            assertThat(query(bigint, "SELECT max(l), sum(l) FROM " + table + " WHERE l < 100")).matches("VALUES (BIGINT '1', BIGINT '1')");
+
+            // Trino computes the exact result with the setting off
+            assertThat(query("SELECT max(l), sum(l), min(l) FROM " + table)).matches("VALUES (BIGINT '9007199254740993', BIGINT '9007199254740994', BIGINT '1')");
+        }
+        finally {
+            deleteIndex(table);
+        }
+    }
+
     // Characterization test: it records the current behavior and is expected to change if cast pushdown
     // (applyProjection of CAST) is added to the connector.
     @Test
@@ -425,6 +514,7 @@ public class TestOpenSearchSqlConnector
             Session dslWithoutStatistical = Session.builder(getSession())
                     .setCatalogSessionProperty(CATALOG, "global_aggregation_engine", "DSL")
                     .build();
+            // "AGGREGATION:" is also a substring of "SQL_AGGREGATION:", so this assertion excludes both pushdown engines
             assertThat(explain(dslWithoutStatistical, statisticalSql)).contains("Aggregate").doesNotContain("AGGREGATION:");
 
             // the default engine answers the base set through SQL
@@ -464,6 +554,20 @@ public class TestOpenSearchSqlConnector
     {
         String plan = explain(session, sql);
         assertThat(plan).doesNotContain("Aggregate").contains("TableScan").contains("AGGREGATION:").doesNotContain("SQL_AGGREGATION");
+    }
+
+    private Session bigintPushdownSession()
+    {
+        return Session.builder(getSession())
+                .setCatalogSessionProperty(CATALOG, "bigint_aggregation_pushdown_enabled", "true")
+                .build();
+    }
+
+    private Session statisticalAndBigintPushdownSession()
+    {
+        return Session.builder(bigintPushdownSession())
+                .setCatalogSessionProperty(CATALOG, "statistical_pushdown_enabled", "true")
+                .build();
     }
 
     private Session statisticalPushdownSession()

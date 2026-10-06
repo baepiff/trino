@@ -245,6 +245,118 @@ public class TestOpenSearchSqlMetadata
         assertThat(applyGlobal(dsl, scanHandle(), List.of(countStar(), function("stddev", DOUBLE, "duration", DOUBLE)))).isEqualTo(SQL_AGGREGATION);
     }
 
+    private static ConnectorSession bigintSession(GlobalAggregationEngine engine, boolean bigintPushdownEnabled)
+    {
+        List<PropertyMetadata<?>> properties = ImmutableList.<PropertyMetadata<?>>builder()
+                .addAll(new OpenSearchSessionProperties(new OpenSearchConfig()).getSessionProperties())
+                .addAll(new OpenSearchSqlSessionProperties(new OpenSearchSqlConfig()).getSessionProperties())
+                .build();
+        return TestingConnectorSession.builder()
+                .setPropertyMetadata(properties)
+                .setPropertyValues(ImmutableMap.of(
+                        "global_aggregation_engine", engine.name(),
+                        "statistical_pushdown_enabled", true,
+                        "bigint_aggregation_pushdown_enabled", bigintPushdownEnabled))
+                .build();
+    }
+
+    @Test
+    public void testBigintAggregatesAreNotPushedByDefault()
+    {
+        ConnectorSession defaults = TestingConnectorSession.builder()
+                .setPropertyMetadata(ImmutableList.<PropertyMetadata<?>>builder()
+                        .addAll(new OpenSearchSessionProperties(new OpenSearchConfig()).getSessionProperties())
+                        .addAll(new OpenSearchSqlSessionProperties(new OpenSearchSqlConfig()).getSessionProperties())
+                        .build())
+                .build();
+        for (AggregateFunction function : bigintFunctions()) {
+            assertThat(apply(defaults, scanHandle(), List.of(function), List.of(List.of()))).as(function.getFunctionName()).isEmpty();
+            assertThat(apply(bigintSession(GlobalAggregationEngine.SQL, false), scanHandle(), List.of(function), List.of(List.of()))).as(function.getFunctionName()).isEmpty();
+        }
+    }
+
+    private static List<AggregateFunction> bigintFunctions()
+    {
+        return List.of(
+                function("min", BIGINT, "tenantId", BIGINT),
+                function("max", BIGINT, "tenantId", BIGINT),
+                function("sum", BIGINT, "tenantId", BIGINT),
+                function("avg", DOUBLE, "tenantId", BIGINT));
+    }
+
+    @Test
+    public void testBigintAggregatesArePushedWhenEnabled()
+    {
+        AggregationApplicationResult<ConnectorTableHandle> result = apply(
+                bigintSession(GlobalAggregationEngine.SQL, true),
+                scanHandle(),
+                bigintFunctions(),
+                List.of(List.of()))
+                .orElseThrow();
+
+        OpenSearchTableHandle handle = (OpenSearchTableHandle) result.getHandle();
+        assertThat(handle.type()).isEqualTo(SQL_AGGREGATION);
+        assertThat(handle.metricAggregations()).extracting(MetricAggregation::functionName).containsExactly("min", "max", "sum", "avg");
+        assertThat(result.getAssignments()).extracting(assignment -> assignment.getVariable() + ":" + assignment.getType())
+                .containsExactly("_pushdown_0:bigint", "_pushdown_1:bigint", "_pushdown_2:bigint", "_pushdown_3:double");
+    }
+
+    @Test
+    public void testBigintPushdownConfigAndSessionOverride()
+    {
+        List<PropertyMetadata<?>> properties = ImmutableList.<PropertyMetadata<?>>builder()
+                .addAll(new OpenSearchSessionProperties(new OpenSearchConfig()).getSessionProperties())
+                .addAll(new OpenSearchSqlSessionProperties(new OpenSearchSqlConfig().setBigintAggregationPushdownEnabled(true)).getSessionProperties())
+                .build();
+        AggregateFunction sum = function("sum", BIGINT, "tenantId", BIGINT);
+
+        ConnectorSession configEnabled = TestingConnectorSession.builder().setPropertyMetadata(properties).build();
+        assertThat(applyGlobal(configEnabled, scanHandle(), List.of(sum))).isEqualTo(SQL_AGGREGATION);
+
+        ConnectorSession sessionDisabled = TestingConnectorSession.builder()
+                .setPropertyMetadata(properties)
+                .setPropertyValues(ImmutableMap.of("bigint_aggregation_pushdown_enabled", false))
+                .build();
+        assertThat(apply(sessionDisabled, scanHandle(), List.of(sum), List.of(List.of()))).isEmpty();
+    }
+
+    @Test
+    public void testBigintPushdownWithMixedAggregates()
+    {
+        ConnectorSession enabled = bigintSession(GlobalAggregationEngine.SQL, true);
+
+        assertThat(applyGlobal(enabled, scanHandle(), List.of(
+                countStar(),
+                function("sum", BIGINT, "tenantId", BIGINT),
+                function("max", INTEGER, "version", INTEGER),
+                function("avg", DOUBLE, "duration", DOUBLE)))).isEqualTo(SQL_AGGREGATION);
+
+        // with the setting off, one BIGINT aggregate keeps the whole statement out of the SQL path
+        assertThat(apply(bigintSession(GlobalAggregationEngine.SQL, false), scanHandle(), List.of(
+                countStar(),
+                function("sum", BIGINT, "tenantId", BIGINT),
+                function("max", INTEGER, "version", INTEGER)), List.of(List.of()))).isEmpty();
+    }
+
+    @Test
+    public void testBigintPushdownDoesNotCoverStatisticalFunctionsOrDsl()
+    {
+        // statistical functions over BIGINT stay in Trino even when the setting is on
+        ConnectorSession enabled = bigintSession(GlobalAggregationEngine.SQL, true);
+        for (String name : List.of("stddev", "stddev_pop", "variance", "var_samp")) {
+            assertThat(apply(enabled, scanHandle(), List.of(function(name, DOUBLE, "tenantId", BIGINT)), List.of(List.of()))).as(name).isEmpty();
+        }
+        assertThat(apply(enabled, scanHandle(), List.of(function("sum", BIGINT, "tenantId", BIGINT), function("stddev", DOUBLE, "tenantId", BIGINT)), List.of(List.of()))).isEmpty();
+
+        // the DSL engine never pushes BIGINT, even when a statistical function moves the statement to SQL
+        ConnectorSession dsl = bigintSession(GlobalAggregationEngine.DSL, true);
+        assertThat(apply(dsl, scanHandle(), List.of(function("sum", BIGINT, "tenantId", BIGINT)), List.of(List.of()))).isEmpty();
+        assertThat(apply(dsl, scanHandle(), List.of(function("sum", BIGINT, "tenantId", BIGINT), function("stddev", DOUBLE, "duration", DOUBLE)), List.of(List.of()))).isEmpty();
+
+        // grouped BIGINT aggregates are not pushed either
+        assertThat(apply(enabled, scanHandle(), List.of(function("sum", BIGINT, "tenantId", BIGINT)), List.of(List.of(KIND)))).isEmpty();
+    }
+
     @Test
     public void testGroupByStaysOnTheDslPath()
     {
@@ -298,7 +410,7 @@ public class TestOpenSearchSqlMetadata
     {
         ConnectorSession session = session(GlobalAggregationEngine.SQL, true);
 
-        // BIGINT inputs are never pushed, by either engine
+        // BIGINT inputs are not pushed unless the opt-in setting is enabled, see the BIGINT tests below
         assertThat(apply(session, scanHandle(), List.of(function("sum", BIGINT, "tenantId", BIGINT)), List.of(List.of()))).isEmpty();
         // count(DISTINCT) is approximate in OpenSearch
         assertThat(apply(session, scanHandle(), List.of(new AggregateFunction("count", BIGINT, List.of(new Variable("version", INTEGER)), List.of(), true, Optional.empty())), List.of(List.of()))).isEmpty();
