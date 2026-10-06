@@ -95,6 +95,12 @@ The following table details all general configuration properties:
     see [](opensearch-text-equality-pushdown). The catalog session property
     `text_equality_pushdown_enabled` overrides this value for a session.
   - `false`
+* - `opensearch.text-groupby-pushdown-enabled`
+  - Push down `GROUP BY` on `text` fields with a `keyword` sub-field, see
+    [](opensearch-text-groupby-pushdown). A query fails when the sub-field does
+    not cover every value. The catalog session property
+    `text_groupby_pushdown_enabled` overrides this value for a session.
+  - `false`
 * - `opensearch.max-aggregation-buckets`
   - Maximum number of buckets requested in each aggregation search request. The
     connector pages through larger results. Must not exceed the cluster
@@ -568,7 +574,9 @@ when all of the following hold:
 
 Range predicates such as `<`, `>`, `<>` and `BETWEEN`, `LIKE`, and `IS NULL`
 and `IS NOT NULL` on `text` fields are not pushed down, and are evaluated by
-Trino. Grouping, sorting and aggregations on `text` fields are not pushed down.
+Trino. Sorting and aggregate functions on `text` fields are not pushed down.
+Grouping is pushed down only when enabled separately, see
+[](opensearch-text-groupby-pushdown).
 
 Two behaviors follow from the predicate being evaluated by OpenSearch on the
 indexed terms instead of by Trino on the values read from `_source`. A document
@@ -594,6 +602,8 @@ Aggregation push down is applied only when all of the following hold:
 * The query groups by none or by columns of type `VARCHAR` (`keyword`),
   `TINYINT`, `SMALLINT`, `INTEGER`, `BIGINT`, or `BOOLEAN`, with a single
   grouping set. `GROUPING SETS`, `CUBE` and `ROLLUP` are not pushed down.
+  Grouping by `text` fields is pushed down through a `keyword` sub-field when
+  enabled, see [](opensearch-text-groupby-pushdown).
 * The group-by columns and aggregate arguments are plain columns that support
   predicate push down. Built-in columns such as `_id` and columns with a raw
   JSON transform are not pushed down.
@@ -620,6 +630,52 @@ returning partial results.
 
 Set `opensearch.aggregation-pushdown-enabled` to `false` to disable aggregation
 push down.
+
+(opensearch-text-groupby-pushdown)=
+#### `GROUP BY` on `text` fields with a `keyword` sub-field
+
+Without push down, Trino reads every document to group by a `text` field, which
+can take minutes on a large index. The `keyword` sub-field of the field can
+answer the grouping in OpenSearch instead. This push down is disabled by
+default. Set `opensearch.text-groupby-pushdown-enabled` to `true` in the
+catalog, or the catalog session property `text_groupby_pushdown_enabled` to
+`true` for a session, to enable it. It does not depend on
+`opensearch.text-equality-pushdown-enabled`.
+
+The groups from the sub-field equal the groups of the column values only if
+every document with a value also has that value in the sub-field. A document
+lacks it when its value is longer than the `ignore_above` of the sub-field, or
+when the document was indexed before the sub-field was added to the mapping.
+Such a document would be counted in the `NULL` group instead of its own group.
+The mapping does not show whether such documents exist, so before it returns
+any group the connector sends one extra count request to OpenSearch, with the
+same filter as the aggregation, for documents that have a value for the field
+but none in the sub-field. If there are any, the query fails with an error that
+reports their number. To run such a query, disable the push down for the
+session, or reindex the documents, for example with `_update_by_query`, so that
+the sub-field covers them. Documents excluded by the `WHERE` clause do not fail
+the query. When the equality push down for `text` fields is enabled as well,
+documents that its filter omits, as described in
+[](opensearch-text-equality-pushdown), are neither grouped nor counted.
+
+The count request cannot find a value that is in `_source` but not indexed for
+the `text` field itself. This happens when the index does not map new fields
+dynamically, `"dynamic": false`, and the field was added to the mapping after
+the documents were indexed. Such documents are counted in the `NULL` group. A
+document whose value is an array is counted in the group of each element, while
+reading it without the push down fails, as for `keyword` columns.
+
+The push down is applied when the column and its sub-field meet the conditions
+for the equality push down listed in [](opensearch-text-equality-pushdown), and
+additionally the `text` field is indexed, without `"index": false`, and keeps
+its norms, or the index keeps the `_field_names` meta field. These are the
+defaults; the count request relies on them to find the documents that have a
+value. A document whose value is the empty string, or only consists of
+characters that the analyzer drops, also counts as having a value. Documents
+without the field or with a `null` value form the `NULL` group, and the empty
+string forms a group of its own, as in Trino. Grouping by `text` and other
+supported columns together is pushed down as well. Sorting by, and aggregate
+functions over, `text` fields are not pushed down.
 
 (opensearch-topn-pushdown)=
 ### TopN push down
