@@ -476,8 +476,8 @@ public class TestOpenSearchMetadata
         assertThat(keywordSubField(textField(subField("english", "text", OptionalInt.empty(), Optional.empty())))).isEmpty();
         assertThat(keywordSubField(textField(subField("wildcard", "wildcard", OptionalInt.empty(), Optional.empty())))).isEmpty();
         // not indexed, or indexing a term for missing values
-        assertThat(keywordSubField(textField(new IndexMetadata.SubField("keyword", "keyword", OptionalInt.of(256), Optional.empty(), false, false)))).isEmpty();
-        assertThat(keywordSubField(textField(new IndexMetadata.SubField("keyword", "keyword", OptionalInt.of(256), Optional.empty(), true, true)))).isEmpty();
+        assertThat(keywordSubField(textField(new IndexMetadata.SubField("keyword", "keyword", OptionalInt.of(256), Optional.empty(), false, false, true)))).isEmpty();
+        assertThat(keywordSubField(textField(new IndexMetadata.SubField("keyword", "keyword", OptionalInt.of(256), Optional.empty(), true, true, true)))).isEmpty();
         // nothing can be indexed
         assertThat(keywordSubField(textField(subField("keyword", "keyword", OptionalInt.of(0), Optional.empty())))).isEmpty();
         // a text field without sub-fields
@@ -516,6 +516,11 @@ public class TestOpenSearchMetadata
         String withoutPresence = codec.toJson(groupable).replaceAll(",\\s*\"presenceIndexed\"\\s*:\\s*true", "");
         assertThat(withoutPresence).doesNotContain("presenceIndexed");
         assertThat(codec.fromJson(withoutPresence)).isEqualTo(textColumnWithKeyword("tenantId", OptionalInt.of(20)));
+        // nor one serialized before the doc values of the sub-field were tracked
+        String withoutDocValues = codec.toJson(groupable).replaceAll(",\\s*\"docValues\"\\s*:\\s*true", "");
+        assertThat(withoutDocValues).doesNotContain("docValues");
+        assertThat(codec.fromJson(withoutDocValues).keywordSubField().orElseThrow().docValues()).isFalse();
+        assertThat(TermAggregation.fromKeywordSubField(codec.fromJson(withoutDocValues))).isEmpty();
     }
 
     @Test
@@ -591,8 +596,8 @@ public class TestOpenSearchMetadata
                 textField(),
                 textField(subField("keyword", "keyword", OptionalInt.of(256), Optional.of("lowercase"))),
                 textField(subField("english", "text", OptionalInt.empty(), Optional.empty())),
-                textField(new IndexMetadata.SubField("keyword", "keyword", OptionalInt.of(256), Optional.empty(), false, false)),
-                textField(new IndexMetadata.SubField("keyword", "keyword", OptionalInt.of(256), Optional.empty(), true, true)))) {
+                textField(new IndexMetadata.SubField("keyword", "keyword", OptionalInt.of(256), Optional.empty(), false, false, true)),
+                textField(new IndexMetadata.SubField("keyword", "keyword", OptionalInt.of(256), Optional.empty(), true, true, true)))) {
             Optional<IndexMetadata.SubField> subField = keywordSubField(field);
             OpenSearchColumnHandle column = new OpenSearchColumnHandle(
                     List.of(field.name()),
@@ -604,6 +609,19 @@ public class TestOpenSearchMetadata
                     subField.isPresent());
             assertThat(applyCountGroupedBy(TEXT_GROUP_BY_SESSION, column)).as(field.toString()).isEmpty();
         }
+
+        // a sub-field without doc values, which the terms source of the composite aggregation cannot read; the equality push down can still use it
+        IndexMetadata.SubField withoutDocValues = new IndexMetadata.SubField("keyword", "keyword", OptionalInt.of(256), Optional.empty(), true, false, false);
+        assertThat(keywordSubField(textField(withoutDocValues))).hasValue(withoutDocValues);
+        OpenSearchColumnHandle withoutDocValuesColumn = new OpenSearchColumnHandle(
+                List.of("tenantId"),
+                VARCHAR,
+                new IndexMetadata.PrimitiveType("text"),
+                new VarcharDecoder.Descriptor("tenantId"),
+                false,
+                Optional.of(withoutDocValues),
+                true);
+        assertThat(applyCountGroupedBy(TEXT_GROUP_BY_SESSION, withoutDocValuesColumn)).isEmpty();
 
         // an eligible sub-field when the presence of a value is not indexed, so uncovered documents cannot be detected
         assertThat(applyCountGroupedBy(TEXT_GROUP_BY_SESSION, textColumnWithKeyword("tenantId", OptionalInt.of(20)))).isEmpty();
@@ -738,7 +756,7 @@ public class TestOpenSearchMetadata
 
     private static IndexMetadata.SubField subField(String name, String type, OptionalInt ignoreAbove, Optional<String> normalizer)
     {
-        return new IndexMetadata.SubField(name, type, ignoreAbove, normalizer, true, false);
+        return new IndexMetadata.SubField(name, type, ignoreAbove, normalizer, true, false, true);
     }
 
     static OpenSearchColumnHandle textColumnWithKeyword(String name, OptionalInt ignoreAbove)

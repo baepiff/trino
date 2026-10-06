@@ -33,7 +33,7 @@ public class TestIndexMetadataParsing
 {
     private static final JsonMapper JSON_MAPPER = new JsonMapper();
 
-    private static final SubField KEYWORD_256 = new SubField("keyword", "keyword", OptionalInt.of(256), Optional.empty(), true, false);
+    private static final SubField KEYWORD_256 = new SubField("keyword", "keyword", OptionalInt.of(256), Optional.empty(), true, false, true);
 
     @Test
     public void testDynamicTextMapping()
@@ -49,9 +49,9 @@ public class TestIndexMetadataParsing
                 """);
 
         assertThat(fields).containsExactly(
-                new Field(false, false, "tenantId", new IndexMetadata.PrimitiveType("text"), List.of(KEYWORD_256)),
-                new Field(false, false, "plain", new IndexMetadata.PrimitiveType("text")),
-                new Field(false, false, "name", new IndexMetadata.PrimitiveType("keyword")));
+                new Field(false, false, "tenantId", new IndexMetadata.PrimitiveType("text"), List.of(KEYWORD_256), true),
+                new Field(false, false, "plain", new IndexMetadata.PrimitiveType("text"), List.of(), true),
+                new Field(false, false, "name", new IndexMetadata.PrimitiveType("keyword"), List.of(), true));
     }
 
     @Test
@@ -67,16 +67,18 @@ public class TestIndexMetadataParsing
                         "with_null": {"type": "keyword", "null_value": "NULL"},
                         "english": {"type": "text", "analyzer": "english"},
                         "bad_limit": {"type": "keyword", "ignore_above": "many"},
-                        "untyped": {"ignore_above": 10}
+                        "untyped": {"ignore_above": 10},
+                        "without_doc_values": {"type": "keyword", "doc_values": false}
                     }}
                 }}}}
                 """);
 
         assertThat(fields.getFirst().subFields()).containsExactly(
-                new SubField("lower", "keyword", OptionalInt.empty(), Optional.of("lowercase"), true, false),
-                new SubField("unindexed", "keyword", OptionalInt.empty(), Optional.empty(), false, false),
-                new SubField("with_null", "keyword", OptionalInt.empty(), Optional.empty(), true, true),
-                new SubField("english", "text", OptionalInt.empty(), Optional.empty(), true, false));
+                new SubField("lower", "keyword", OptionalInt.empty(), Optional.of("lowercase"), true, false, true),
+                new SubField("unindexed", "keyword", OptionalInt.empty(), Optional.empty(), false, false, true),
+                new SubField("with_null", "keyword", OptionalInt.empty(), Optional.empty(), true, true, true),
+                new SubField("english", "text", OptionalInt.empty(), Optional.empty(), true, false, true),
+                new SubField("without_doc_values", "keyword", OptionalInt.empty(), Optional.empty(), true, false, false));
     }
 
     @Test
@@ -92,8 +94,9 @@ public class TestIndexMetadataParsing
                 }}}}
                 """);
 
+        // nor is the presence of a value determined for them
         assertThat(((ObjectType) fields.getFirst().type()).fields())
-                .containsExactly(new Field(false, false, "name", new IndexMetadata.PrimitiveType("text")));
+                .containsExactly(new Field(false, false, "name", new IndexMetadata.PrimitiveType("text"), List.of(), false));
     }
 
     @Test
