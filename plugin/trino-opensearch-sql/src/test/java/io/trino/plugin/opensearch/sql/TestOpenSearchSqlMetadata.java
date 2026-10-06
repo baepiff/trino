@@ -20,6 +20,7 @@ import io.trino.plugin.opensearch.OpenSearchColumnHandle;
 import io.trino.plugin.opensearch.OpenSearchConfig;
 import io.trino.plugin.opensearch.OpenSearchSessionProperties;
 import io.trino.plugin.opensearch.OpenSearchTableHandle;
+import io.trino.plugin.opensearch.TermAggregation;
 import io.trino.plugin.opensearch.TopN;
 import io.trino.plugin.opensearch.client.IndexMetadata;
 import io.trino.plugin.opensearch.client.OpenSearchClient;
@@ -427,6 +428,41 @@ public class TestOpenSearchSqlMetadata
 
         // statistical functions need the SQL engine, so they stay in Trino
         assertThat(apply(session(GlobalAggregationEngine.SQL, true), scanHandle(constraint, Map.of()), List.of(function("stddev", DOUBLE, "duration", DOUBLE)), List.of(List.of()))).isEmpty();
+    }
+
+    @Test
+    public void testGroupByTextColumnInheritsKeywordSubFieldPushdown()
+    {
+        OpenSearchColumnHandle tenant = new OpenSearchColumnHandle(
+                List.of("tenantName"),
+                VARCHAR,
+                new IndexMetadata.PrimitiveType("text"),
+                new VarcharDecoder.Descriptor("tenantName"),
+                false,
+                Optional.of(new IndexMetadata.SubField("keyword", "keyword", OptionalInt.of(256), Optional.empty(), true, false)),
+                true);
+
+        // off by default
+        assertThat(apply(session(GlobalAggregationEngine.SQL, true), scanHandle(), List.of(countStar()), List.of(List.of(tenant)))).isEmpty();
+
+        for (GlobalAggregationEngine engine : GlobalAggregationEngine.values()) {
+            ConnectorSession session = TestingConnectorSession.builder()
+                    .setPropertyMetadata(ImmutableList.<PropertyMetadata<?>>builder()
+                            .addAll(new OpenSearchSessionProperties(new OpenSearchConfig()).getSessionProperties())
+                            .addAll(new OpenSearchSqlSessionProperties(new OpenSearchSqlConfig()).getSessionProperties())
+                            .build())
+                    .setPropertyValues(ImmutableMap.of(
+                            "global_aggregation_engine", engine.name(),
+                            "text_groupby_pushdown_enabled", true))
+                    .build();
+            OpenSearchTableHandle handle = (OpenSearchTableHandle) apply(session, scanHandle(), List.of(countStar()), List.of(List.of(tenant)))
+                    .orElseThrow()
+                    .getHandle();
+
+            // GROUP BY is never sent to the SQL plugin, the inherited DSL path groups on the keyword sub-field
+            assertThat(handle.type()).as(engine.name()).isEqualTo(AGGREGATION);
+            assertThat(handle.termAggregations()).containsExactly(new TermAggregation("tenantName", VARCHAR, Optional.of("keyword")));
+        }
     }
 
     @Test

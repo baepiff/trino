@@ -95,6 +95,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Verify.verifyNotNull;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
@@ -503,10 +504,10 @@ public class OpenSearchClient
 
         IndexMetadata.ObjectType schema = parseType(mappings.get("properties"), metaProperties, true);
 
-        List<JsonNode> allProperties = typeMappings.stream()
-                .map(typeMapping -> typeMapping.map(node -> node.get("properties")).orElse(NullNode.getInstance()))
+        List<JsonNode> allMappings = typeMappings.stream()
+                .map(typeMapping -> typeMapping.orElse(NullNode.getInstance()))
                 .collect(toImmutableList());
-        return new IndexMetadata(retainConsistentSubFields(schema, allProperties));
+        return new IndexMetadata(retainConsistentSubFields(schema, allMappings));
     }
 
     private static Optional<JsonNode> typeMapping(JsonNode mappings)
@@ -618,16 +619,18 @@ public class OpenSearchClient
      * Keeps a sub-field of a top-level field only when every index behind the table declares the field and the
      * sub-field identically, and when no field is copied into the field or the sub-field with {@code copy_to}. A copied
      * value is indexed under the field without being part of its {@code _source}, so a query on the sub-field would
-     * match documents whose Trino value differs.
+     * match documents whose Trino value differs. Also determines for every top-level field whether every index records
+     * the presence of a value, see {@link IndexMetadata.Field#presenceIndexed()}.
      */
-    private static IndexMetadata.ObjectType retainConsistentSubFields(IndexMetadata.ObjectType schema, List<JsonNode> allProperties)
+    private static IndexMetadata.ObjectType retainConsistentSubFields(IndexMetadata.ObjectType schema, List<JsonNode> allMappings)
     {
-        if (schema.fields().stream().allMatch(field -> field.subFields().isEmpty())) {
-            return schema;
-        }
-
+        List<JsonNode> allProperties = allMappings.stream()
+                .map(mapping -> mapping.path("properties"))
+                .collect(toImmutableList());
         ImmutableSet.Builder<String> copyToTargetsBuilder = ImmutableSet.builder();
-        allProperties.forEach(properties -> collectCopyToTargets(properties, copyToTargetsBuilder));
+        if (schema.fields().stream().anyMatch(field -> !field.subFields().isEmpty())) {
+            allProperties.forEach(properties -> collectCopyToTargets(properties, copyToTargetsBuilder));
+        }
         Set<String> copyToTargets = copyToTargetsBuilder.build();
 
         ImmutableList.Builder<IndexMetadata.Field> fields = ImmutableList.builder();
@@ -636,9 +639,25 @@ public class OpenSearchClient
                     .filter(subField -> !copyToTargets.contains(field.name()) && !copyToTargets.contains(field.name() + "." + subField.name()))
                     .filter(subField -> allProperties.stream().allMatch(properties -> declaresSubField(properties, field, subField)))
                     .collect(toImmutableList());
-            fields.add(new IndexMetadata.Field(field.asRawJson(), field.isArray(), field.name(), field.type(), subFields));
+            boolean presenceIndexed = allMappings.stream().allMatch(mapping -> isPresenceIndexed(mapping, field.name()));
+            fields.add(new IndexMetadata.Field(field.asRawJson(), field.isArray(), field.name(), field.type(), subFields, presenceIndexed));
         }
         return new IndexMetadata.ObjectType(fields.build());
+    }
+
+    /**
+     * Whether an {@code exists} query on a top-level {@code text} field of the mapping matches every document with a
+     * value for it. Such a query reads the norms of the field, which are written for every indexed value, also an empty
+     * string or a value without any token, or the {@code _field_names} meta field when the norms are disabled. A field
+     * that is not indexed leaves no trace of its value.
+     */
+    private static boolean isPresenceIndexed(JsonNode mapping, String fieldName)
+    {
+        JsonNode field = mapping.path("properties").path(fieldName);
+        if (!field.isObject() || !field.path("index").asBoolean(true)) {
+            return false;
+        }
+        return field.path("norms").asBoolean(true) || mapping.path("_field_names").path("enabled").asBoolean(true);
     }
 
     private static boolean declaresSubField(JsonNode properties, IndexMetadata.Field field, IndexMetadata.SubField subField)
@@ -811,6 +830,17 @@ public class OpenSearchClient
                 .source(sourceBuilder);
 
         return search(request);
+    }
+
+    /**
+     * Counts the documents matching the query over all shards of the index expression in one request, failing
+     * instead of returning a partial count when a shard fails.
+     */
+    public long countDocuments(String index, QueryBuilder query)
+    {
+        SearchResponse response = beginAggregationSearch(index, query, ImmutableList.of());
+        verifyNotNull(response.getHits().getTotalHits(), "Total hits are missing from the count response");
+        return response.getHits().getTotalHits().value();
     }
 
     private SearchResponse search(SearchRequest request)

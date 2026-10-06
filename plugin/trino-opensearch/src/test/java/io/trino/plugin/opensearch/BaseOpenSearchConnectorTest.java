@@ -1659,6 +1659,233 @@ public abstract class BaseOpenSearchConnectorTest
     }
 
     @Test
+    public void testTextFieldGroupByPushdown()
+            throws Exception
+    {
+        String tableName = "test_text_groupby_pushdown_" + randomNameSuffix();
+        @Language("JSON")
+        String properties =
+                """
+                {
+                    "properties": {
+                        "id": { "type": "integer" },
+                        "region": { "type": "keyword" },
+                        "tenant": { "type": "text", "fields": { "keyword": { "type": "keyword", "ignore_above": 20 } } }
+                    }
+                }
+                """;
+
+        createIndex(tableName, properties);
+        try {
+            index(tableName, ImmutableMap.of("id", 1, "region", "r1", "tenant", "tenant-a"));
+            index(tableName, ImmutableMap.of("id", 2, "region", "r2", "tenant", "tenant-a"));
+            index(tableName, ImmutableMap.of("id", 3, "region", "r1", "tenant", "Tenant-A"));
+            index(tableName, ImmutableMap.of("id", 4, "region", "r1", "tenant", "tenant a"));
+            index(tableName, ImmutableMap.of("id", 5, "region", "r2", "tenant", "tenant-b"));
+            index(tableName, ImmutableMap.of("id", 6, "region", "r1", "tenant", ""));
+            index(tableName, ImmutableMap.of("id", 7, "region", "r2"));
+            Map<String, Object> nullTenant = new HashMap<>();
+            nullTenant.put("id", 8);
+            nullTenant.put("region", "r2");
+            nullTenant.put("tenant", null);
+            index(tableName, nullTenant);
+
+            @Language("SQL")
+            String groupedQuery = "SELECT tenant, count(*) FROM " + tableName + " GROUP BY tenant";
+            // the NULL group, the empty string and the values differing only by case are groups of their own
+            String expected = "VALUES " +
+                    "(CAST(NULL AS VARCHAR), BIGINT '2'), " +
+                    "(CAST('' AS VARCHAR), BIGINT '1'), " +
+                    "(CAST('Tenant-A' AS VARCHAR), BIGINT '1'), " +
+                    "(CAST('tenant a' AS VARCHAR), BIGINT '1'), " +
+                    "(CAST('tenant-a' AS VARCHAR), BIGINT '2'), " +
+                    "(CAST('tenant-b' AS VARCHAR), BIGINT '1')";
+
+            // off by default: the grouping stays in Trino and is still correct
+            assertThat(query(groupedQuery))
+                    .matches(expected)
+                    .isNotFullyPushedDown(AggregationNode.class);
+
+            assertThat(query(textGroupByPushdown(), groupedQuery))
+                    .matches(expected)
+                    .isFullyPushedDown();
+            // together with a keyword column and other aggregates
+            assertThat(query(textGroupByPushdown(), "SELECT region, tenant, count(*), max(id) FROM " + tableName + " GROUP BY region, tenant"))
+                    .matches("VALUES " +
+                            "(CAST('r1' AS VARCHAR), CAST('' AS VARCHAR), BIGINT '1', 6), " +
+                            "(CAST('r1' AS VARCHAR), CAST('Tenant-A' AS VARCHAR), BIGINT '1', 3), " +
+                            "(CAST('r1' AS VARCHAR), CAST('tenant a' AS VARCHAR), BIGINT '1', 4), " +
+                            "(CAST('r1' AS VARCHAR), CAST('tenant-a' AS VARCHAR), BIGINT '1', 1), " +
+                            "(CAST('r2' AS VARCHAR), CAST(NULL AS VARCHAR), BIGINT '2', 8), " +
+                            "(CAST('r2' AS VARCHAR), CAST('tenant-a' AS VARCHAR), BIGINT '1', 2), " +
+                            "(CAST('r2' AS VARCHAR), CAST('tenant-b' AS VARCHAR), BIGINT '1', 5)")
+                    .isFullyPushedDown();
+            // with a filter on another column
+            assertThat(query(textGroupByPushdown(), "SELECT tenant, count(*) FROM " + tableName + " WHERE region = 'r2' GROUP BY tenant"))
+                    .matches("VALUES (CAST(NULL AS VARCHAR), BIGINT '2'), (CAST('tenant-a' AS VARCHAR), BIGINT '1'), (CAST('tenant-b' AS VARCHAR), BIGINT '1')")
+                    .isFullyPushedDown();
+            // with a filter on the same column, when its equality is pushed down as well
+            Session bothPushdowns = Session.builder(textGroupByPushdown())
+                    .setCatalogSessionProperty(getSession().getCatalog().orElseThrow(), "text_equality_pushdown_enabled", "true")
+                    .build();
+            assertThat(query(bothPushdowns, "SELECT tenant, count(*) FROM " + tableName + " WHERE tenant IN ('tenant-a', 'Tenant-A') GROUP BY tenant"))
+                    .matches("VALUES (CAST('Tenant-A' AS VARCHAR), BIGINT '1'), (CAST('tenant-a' AS VARCHAR), BIGINT '2')")
+                    .isFullyPushedDown();
+            // GROUP BY with ORDER BY and LIMIT: the grouping is pushed, the TopN stays in Trino
+            assertThat(query(textGroupByPushdown(), "SELECT tenant, count(*) FROM " + tableName + " GROUP BY tenant ORDER BY tenant LIMIT 2"))
+                    .matches("VALUES (CAST('' AS VARCHAR), BIGINT '1'), (CAST('Tenant-A' AS VARCHAR), BIGINT '1')")
+                    .isNotFullyPushedDown(TopNNode.class);
+
+            // a single bucket per request forces pagination, so every group key, also NULL and the empty string, is sent back in the after_key
+            try (QueryAssertions assertions = new QueryAssertions(createAdHocQueryRunner(Map.of(
+                    "opensearch.max-aggregation-buckets", "1",
+                    "opensearch.text-groupby-pushdown-enabled", "true")))) {
+                assertThat(assertions.query(groupedQuery)).matches(expected).isFullyPushedDown();
+            }
+        }
+        finally {
+            deleteIndex(tableName);
+        }
+    }
+
+    @Test
+    public void testTextFieldGroupByPushdownFailsOnValuesLongerThanIgnoreAbove()
+            throws IOException
+    {
+        String tableName = "test_text_groupby_ignore_above_" + randomNameSuffix();
+        @Language("JSON")
+        String properties =
+                """
+                {
+                    "properties": {
+                        "id": { "type": "integer" },
+                        "tenant": { "type": "text", "fields": { "keyword": { "type": "keyword", "ignore_above": 20 } } }
+                    }
+                }
+                """;
+
+        createIndex(tableName, properties);
+        try {
+            String longValue = "tenant-a-with-a-long-identifier";
+            assertThat(longValue.length()).isGreaterThan(20);
+            index(tableName, ImmutableMap.of("id", 1, "tenant", "tenant-a"));
+            index(tableName, ImmutableMap.of("id", 2, "tenant", longValue));
+            index(tableName, ImmutableMap.of("id", 3));
+
+            // the long value is missing from the sub-field and would be counted in the NULL group, so the query fails
+            @Language("SQL")
+            String groupedQuery = "SELECT tenant, count(*) FROM " + tableName + " GROUP BY tenant";
+            assertQueryFails(
+                    textGroupByPushdown(),
+                    groupedQuery,
+                    "\\QGROUP BY on text columns cannot be pushed down through their keyword sub-fields (tenant.keyword): 1 matching documents have a value that is not indexed in the sub-field\\E.*" +
+                            "\\Qopensearch.text-groupby-pushdown-enabled\\E.*\\Qtext_groupby_pushdown_enabled\\E.*");
+
+            // the verification only covers the documents of the filter
+            assertThat(query(textGroupByPushdown(), "SELECT tenant, count(*) FROM " + tableName + " WHERE id <> 2 GROUP BY tenant"))
+                    .matches("VALUES (CAST(NULL AS VARCHAR), BIGINT '1'), (CAST('tenant-a' AS VARCHAR), BIGINT '1')")
+                    .isFullyPushedDown();
+
+            // without the push down, the long value is its own group
+            assertThat(query(groupedQuery))
+                    .matches("VALUES (CAST(NULL AS VARCHAR), BIGINT '1'), (CAST('tenant-a' AS VARCHAR), BIGINT '1'), (CAST('" + longValue + "' AS VARCHAR), BIGINT '1')")
+                    .isNotFullyPushedDown(AggregationNode.class);
+        }
+        finally {
+            deleteIndex(tableName);
+        }
+    }
+
+    @Test
+    public void testTextFieldGroupByPushdownFailsOnDocumentsIndexedBeforeSubField()
+            throws IOException
+    {
+        String tableName = "test_text_groupby_added_sub_field_" + randomNameSuffix();
+        createIndex(tableName, "{\"properties\": {\"id\": {\"type\": \"integer\"}, \"tenant\": {\"type\": \"text\"}}}");
+        try {
+            index(tableName, ImmutableMap.of("id", 1, "tenant", "old"));
+            // an empty string is not covered either, and the exists query still finds it
+            index(tableName, ImmutableMap.of("id", 2, "tenant", ""));
+            index(tableName, ImmutableMap.of("id", 3));
+
+            Request putMapping = new Request("PUT", "/" + tableName + "/_mapping");
+            putMapping.setJsonEntity("{\"properties\": {\"tenant\": {\"type\": \"text\", \"fields\": {\"keyword\": {\"type\": \"keyword\", \"ignore_above\": 256}}}}}");
+            client.getLowLevelClient().performRequest(putMapping);
+            index(tableName, ImmutableMap.of("id", 4, "tenant", "new"));
+
+            @Language("SQL")
+            String groupedQuery = "SELECT tenant, count(*) FROM " + tableName + " GROUP BY tenant";
+            String expected = "VALUES (CAST(NULL AS VARCHAR), BIGINT '1'), (CAST('' AS VARCHAR), BIGINT '1'), (CAST('new' AS VARCHAR), BIGINT '1'), (CAST('old' AS VARCHAR), BIGINT '1')";
+            assertQueryFails(
+                    textGroupByPushdown(),
+                    groupedQuery,
+                    "\\QGROUP BY on text columns cannot be pushed down through their keyword sub-fields (tenant.keyword): 2 matching documents have a value that is not indexed in the sub-field\\E.*");
+            assertThat(query(groupedQuery))
+                    .matches(expected)
+                    .isNotFullyPushedDown(AggregationNode.class);
+
+            // reindexing the documents in place adds their values to the sub-field
+            Request updateByQuery = new Request("POST", "/" + tableName + "/_update_by_query?refresh=true&conflicts=proceed");
+            client.getLowLevelClient().performRequest(updateByQuery);
+            assertThat(query(textGroupByPushdown(), groupedQuery))
+                    .matches(expected)
+                    .isFullyPushedDown();
+        }
+        finally {
+            deleteIndex(tableName);
+        }
+    }
+
+    @Test
+    public void testTextFieldGroupByWithUnsuitableMappingIsNotPushedDown()
+            throws IOException
+    {
+        String tableName = "test_text_groupby_unsuitable_" + randomNameSuffix();
+        @Language("JSON")
+        String settings =
+                """
+                {
+                    "settings": {
+                        "analysis": { "normalizer": { "lower": { "type": "custom", "filter": ["lowercase"] } } }
+                    },
+                    "mappings": {
+                        "properties": {
+                            "id": { "type": "integer" },
+                            "normalized": { "type": "text", "fields": { "keyword": { "type": "keyword", "normalizer": "lower" } } },
+                            "analyzed": { "type": "text", "fields": { "english": { "type": "text", "analyzer": "english" } } },
+                            "plain": { "type": "text" },
+                            "not_indexed": { "type": "text", "index": false, "fields": { "keyword": { "type": "keyword" } } }
+                        }
+                    }
+                }
+                """;
+        Request request = new Request("PUT", "/" + tableName);
+        request.setJsonEntity(settings);
+        client.getLowLevelClient().performRequest(request);
+        try {
+            index(tableName, ImmutableMap.of("id", 1, "normalized", "tenant-a", "analyzed", "tenant-a", "plain", "tenant-a", "not_indexed", "tenant-a"));
+            index(tableName, ImmutableMap.of("id", 2, "normalized", "Tenant-A", "analyzed", "Tenant-A", "plain", "Tenant-A", "not_indexed", "Tenant-A"));
+
+            // a normalizer would merge the groups; without an indexed text field, uncovered documents could not be detected
+            for (String column : List.of("normalized", "analyzed", "plain", "not_indexed")) {
+                assertThat(query(textGroupByPushdown(), "SELECT " + column + ", count(*) FROM " + tableName + " GROUP BY " + column))
+                        .matches("VALUES (CAST('Tenant-A' AS VARCHAR), BIGINT '1'), (CAST('tenant-a' AS VARCHAR), BIGINT '1')")
+                        .isNotFullyPushedDown(AggregationNode.class);
+            }
+        }
+        finally {
+            deleteIndex(tableName);
+        }
+    }
+
+    private Session textGroupByPushdown()
+    {
+        return Session.builder(getSession())
+                .setCatalogSessionProperty(getSession().getCatalog().orElseThrow(), "text_groupby_pushdown_enabled", "true")
+                .build();
+    }
+
+    @Test
     public void testDataTypes()
             throws IOException
     {

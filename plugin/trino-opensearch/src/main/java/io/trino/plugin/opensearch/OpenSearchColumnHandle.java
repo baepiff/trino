@@ -30,6 +30,9 @@ import static java.util.Objects.requireNonNull;
  * @param keywordSubField a {@code keyword} sub-field of a {@code text} column whose terms are exactly the column
  *         values, so that equality predicates on the column can be answered by the sub-field; see
  *         {@link OpenSearchMetadata#keywordSubField}
+ * @param presenceIndexed whether an {@code exists} query on the column matches every document with a value for it,
+ *         which lets a grouping on the keyword sub-field detect the documents that the sub-field does not cover; see
+ *         {@link IndexMetadata.Field#presenceIndexed()}. Only determined for columns with a keyword sub-field
  */
 public record OpenSearchColumnHandle(
         List<String> path,
@@ -37,7 +40,8 @@ public record OpenSearchColumnHandle(
         IndexMetadata.Type opensearchType,
         DecoderDescriptor decoderDescriptor,
         boolean supportsPredicates,
-        Optional<IndexMetadata.SubField> keywordSubField)
+        Optional<IndexMetadata.SubField> keywordSubField,
+        boolean presenceIndexed)
         implements ColumnHandle
 {
     @JsonCreator
@@ -51,6 +55,11 @@ public record OpenSearchColumnHandle(
         if (keywordSubField == null) {
             keywordSubField = Optional.empty();
         }
+    }
+
+    public OpenSearchColumnHandle(List<String> path, Type type, IndexMetadata.Type opensearchType, DecoderDescriptor decoderDescriptor, boolean supportsPredicates, Optional<IndexMetadata.SubField> keywordSubField)
+    {
+        this(path, type, opensearchType, decoderDescriptor, supportsPredicates, keywordSubField, false);
     }
 
     public OpenSearchColumnHandle(List<String> path, Type type, IndexMetadata.Type opensearchType, DecoderDescriptor decoderDescriptor, boolean supportsPredicates)

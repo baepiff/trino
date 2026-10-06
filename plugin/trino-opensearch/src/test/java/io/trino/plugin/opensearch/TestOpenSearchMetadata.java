@@ -33,6 +33,7 @@ import io.trino.plugin.opensearch.decoders.TimestampDecoder;
 import io.trino.plugin.opensearch.decoders.VarcharDecoder;
 import io.trino.spi.connector.AggregateFunction;
 import io.trino.spi.connector.AggregationApplicationResult;
+import io.trino.spi.connector.Assignment;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableHandle;
@@ -81,6 +82,7 @@ public class TestOpenSearchMetadata
 {
     private static final ConnectorSession SESSION = session(true);
     private static final ConnectorSession TEXT_EQUALITY_SESSION = textEqualitySession(new OpenSearchConfig(), true);
+    private static final ConnectorSession TEXT_GROUP_BY_SESSION = textGroupBySession(new OpenSearchConfig(), true);
 
     private OpenSearchClient client;
     private OpenSearchMetadata metadata;
@@ -507,6 +509,168 @@ public class TestOpenSearchMetadata
         String json = codec.toJson(keyword).replaceAll(",\\s*\"keywordSubField\"\\s*:\\s*null", "");
         assertThat(json).doesNotContain("keywordSubField");
         assertThat(codec.fromJson(json)).isEqualTo(keyword);
+
+        OpenSearchColumnHandle groupable = groupableTextColumn("tenantId", OptionalInt.of(20));
+        assertThat(codec.fromJson(codec.toJson(groupable))).isEqualTo(groupable);
+        // a handle serialized before the presence of a value was tracked cannot be grouped on
+        String withoutPresence = codec.toJson(groupable).replaceAll(",\\s*\"presenceIndexed\"\\s*:\\s*true", "");
+        assertThat(withoutPresence).doesNotContain("presenceIndexed");
+        assertThat(codec.fromJson(withoutPresence)).isEqualTo(textColumnWithKeyword("tenantId", OptionalInt.of(20)));
+    }
+
+    @Test
+    public void testTermAggregationJsonRoundTrip()
+    {
+        JsonMapper mapper = new JsonMapperProvider().get()
+                .rebuild()
+                .addModule(new SimpleModule().addDeserializer(Type.class, new TypeDeserializer(TESTING_TYPE_MANAGER)))
+                .build();
+        JsonCodec<TermAggregation> codec = new JsonCodecFactory(mapper).jsonCodec(TermAggregation.class);
+
+        TermAggregation subField = new TermAggregation("tenantId", VARCHAR, Optional.of("keyword"));
+        assertThat(codec.fromJson(codec.toJson(subField))).isEqualTo(subField);
+        assertThat(codec.toJson(subField)).doesNotContain("field\"");
+        TermAggregation keyword = new TermAggregation("name", VARCHAR);
+        assertThat(codec.fromJson(codec.toJson(keyword))).isEqualTo(keyword);
+
+        // a term serialized before text columns could be grouped on
+        String json = codec.toJson(keyword).replaceAll(",\\s*\"subField\"\\s*:\\s*null", "");
+        assertThat(json).doesNotContain("subField");
+        assertThat(codec.fromJson(json)).isEqualTo(keyword);
+    }
+
+    @Test
+    public void testGroupByTextColumnNotPushedByDefault()
+    {
+        OpenSearchColumnHandle tenant = groupableTextColumn("tenantId", OptionalInt.of(20));
+
+        assertThat(applyCountGroupedBy(SESSION, tenant)).isEmpty();
+        assertThat(applyCountGroupedBy(textGroupBySession(new OpenSearchConfig(), false), tenant)).isEmpty();
+        // the equality switch does not enable it
+        assertThat(applyCountGroupedBy(TEXT_EQUALITY_SESSION, tenant)).isEmpty();
+    }
+
+    @Test
+    public void testGroupByTextColumnPushedToKeywordSubField()
+    {
+        OpenSearchColumnHandle tenant = groupableTextColumn("tenantId", OptionalInt.of(20));
+
+        AggregationApplicationResult<ConnectorTableHandle> result = applyCountGroupedBy(TEXT_GROUP_BY_SESSION, tenant).orElseThrow();
+
+        OpenSearchTableHandle handle = (OpenSearchTableHandle) result.getHandle();
+        assertThat(handle.type()).isEqualTo(OpenSearchTableHandle.Type.AGGREGATION);
+        assertThat(handle.termAggregations()).containsExactly(new TermAggregation("tenantId", VARCHAR, Optional.of("keyword")));
+        assertThat(handle.termAggregations().getFirst().field()).isEqualTo("tenantId.keyword");
+        assertThat(handle.metricAggregations()).containsExactly(new MetricAggregation("count", BIGINT, Optional.empty(), "_pushdown_0"));
+        // the grouping column itself is the output, read under its own name and type
+        assertThat(result.getGroupingColumnMapping()).isEmpty();
+        assertThat(result.getAssignments()).extracting(Assignment::getVariable).containsExactly("_pushdown_0");
+    }
+
+    @Test
+    public void testGroupByTextColumnSessionOverridesConfig()
+    {
+        OpenSearchColumnHandle tenant = groupableTextColumn("tenantId", OptionalInt.of(20));
+
+        // config on, session switches it off
+        OpenSearchConfig enabled = new OpenSearchConfig().setTextGroupByPushdownEnabled(true);
+        assertThat(applyCountGroupedBy(textGroupBySession(enabled, null), tenant)).isPresent();
+        assertThat(applyCountGroupedBy(textGroupBySession(enabled, false), tenant)).isEmpty();
+
+        // config off, session switches it on
+        OpenSearchConfig disabled = new OpenSearchConfig();
+        assertThat(applyCountGroupedBy(textGroupBySession(disabled, null), tenant)).isEmpty();
+        assertThat(applyCountGroupedBy(textGroupBySession(disabled, true), tenant)).isPresent();
+    }
+
+    @Test
+    public void testGroupByTextColumnWithoutEligibleSubFieldNotPushed()
+    {
+        // the mapping-level eligibility is the one of the equality push down
+        for (IndexMetadata.Field field : List.of(
+                textField(),
+                textField(subField("keyword", "keyword", OptionalInt.of(256), Optional.of("lowercase"))),
+                textField(subField("english", "text", OptionalInt.empty(), Optional.empty())),
+                textField(new IndexMetadata.SubField("keyword", "keyword", OptionalInt.of(256), Optional.empty(), false, false)),
+                textField(new IndexMetadata.SubField("keyword", "keyword", OptionalInt.of(256), Optional.empty(), true, true)))) {
+            Optional<IndexMetadata.SubField> subField = keywordSubField(field);
+            OpenSearchColumnHandle column = new OpenSearchColumnHandle(
+                    List.of(field.name()),
+                    VARCHAR,
+                    field.type(),
+                    new VarcharDecoder.Descriptor(field.name()),
+                    false,
+                    subField,
+                    subField.isPresent());
+            assertThat(applyCountGroupedBy(TEXT_GROUP_BY_SESSION, column)).as(field.toString()).isEmpty();
+        }
+
+        // an eligible sub-field when the presence of a value is not indexed, so uncovered documents cannot be detected
+        assertThat(applyCountGroupedBy(TEXT_GROUP_BY_SESSION, textColumnWithKeyword("tenantId", OptionalInt.of(20)))).isEmpty();
+        // a text column without sub-field
+        assertThat(applyCountGroupedBy(TEXT_GROUP_BY_SESSION, textColumn("description"))).isEmpty();
+    }
+
+    @Test
+    public void testGroupByKeywordAndTextColumns()
+    {
+        OpenSearchColumnHandle tenant = groupableTextColumn("tenantId", OptionalInt.of(20));
+        OpenSearchColumnHandle kind = keywordColumn("kind");
+        OpenSearchColumnHandle value = integerColumn("value");
+
+        AggregationApplicationResult<ConnectorTableHandle> result = metadata.applyAggregation(
+                        TEXT_GROUP_BY_SESSION,
+                        scanHandle(),
+                        List.of(new AggregateFunction("max", INTEGER, List.of(new Variable("value", INTEGER)), List.of(), false, Optional.empty())),
+                        Map.of("value", value),
+                        List.of(List.of(kind, tenant)))
+                .orElseThrow();
+
+        assertThat(((OpenSearchTableHandle) result.getHandle()).termAggregations()).containsExactly(
+                new TermAggregation("kind", VARCHAR),
+                new TermAggregation("tenantId", VARCHAR, Optional.of("keyword")));
+
+        // one grouping column that cannot be pushed keeps the whole aggregation in Trino
+        assertThat(metadata.applyAggregation(
+                TEXT_GROUP_BY_SESSION,
+                scanHandle(),
+                List.of(new AggregateFunction("count", BIGINT, List.of(), List.of(), false, Optional.empty())),
+                Map.of(),
+                List.of(List.of(tenant, textColumn("description"))))).isEmpty();
+    }
+
+    @Test
+    public void testTextColumnStillRejectedForSortAndMetrics()
+    {
+        OpenSearchColumnHandle tenant = groupableTextColumn("tenantId", OptionalInt.of(20));
+
+        assertThat(metadata.applyTopN(
+                TEXT_GROUP_BY_SESSION,
+                scanHandle(),
+                5,
+                List.of(new SortItem("tenantId", SortOrder.ASC_NULLS_LAST)),
+                Map.of("tenantId", tenant))).isEmpty();
+        for (String function : List.of("min", "max", "count")) {
+            Type outputType = function.equals("count") ? BIGINT : VARCHAR;
+            assertThat(metadata.applyAggregation(
+                    TEXT_GROUP_BY_SESSION,
+                    scanHandle(),
+                    List.of(new AggregateFunction(function, outputType, List.of(new Variable("tenantId", VARCHAR)), List.of(), false, Optional.empty())),
+                    Map.of("tenantId", tenant),
+                    List.of(List.of())))
+                    .as(function)
+                    .isEmpty();
+        }
+    }
+
+    private Optional<AggregationApplicationResult<ConnectorTableHandle>> applyCountGroupedBy(ConnectorSession session, OpenSearchColumnHandle column)
+    {
+        return metadata.applyAggregation(
+                session,
+                scanHandle(),
+                List.of(new AggregateFunction("count", BIGINT, List.of(), List.of(), false, Optional.empty())),
+                Map.of(),
+                List.of(List.of(column)));
     }
 
     @Test
@@ -588,6 +752,21 @@ public class TestOpenSearchMetadata
                 Optional.of(subField("keyword", "keyword", ignoreAbove, Optional.empty())));
     }
 
+    /**
+     * A text column with a keyword sub-field whose index records the presence of a value, as the defaults of a mapping do.
+     */
+    static OpenSearchColumnHandle groupableTextColumn(String name, OptionalInt ignoreAbove)
+    {
+        return new OpenSearchColumnHandle(
+                List.of(name),
+                VARCHAR,
+                new IndexMetadata.PrimitiveType("text"),
+                new VarcharDecoder.Descriptor(name),
+                false,
+                Optional.of(subField("keyword", "keyword", ignoreAbove, Optional.empty())),
+                true);
+    }
+
     private Optional<TopNApplicationResult<ConnectorTableHandle>> applyTopN(OpenSearchColumnHandle column)
     {
         return metadata.applyTopN(
@@ -665,6 +844,20 @@ public class TestOpenSearchMetadata
                 .setPropertyMetadata(new OpenSearchSessionProperties(config).getSessionProperties());
         if (override != null) {
             builder.setPropertyValues(ImmutableMap.of("text_equality_pushdown_enabled", override));
+        }
+        return builder.build();
+    }
+
+    /**
+     * A session whose defaults come from the given config, with the text GROUP BY session property overridden
+     * when {@code override} is not null.
+     */
+    static ConnectorSession textGroupBySession(OpenSearchConfig config, Boolean override)
+    {
+        TestingConnectorSession.Builder builder = TestingConnectorSession.builder()
+                .setPropertyMetadata(new OpenSearchSessionProperties(config).getSessionProperties());
+        if (override != null) {
+            builder.setPropertyValues(ImmutableMap.of("text_groupby_pushdown_enabled", override));
         }
         return builder.build();
     }

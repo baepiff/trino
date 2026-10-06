@@ -18,6 +18,7 @@ import io.trino.plugin.opensearch.AggregationResponseReader.Result;
 import io.trino.plugin.opensearch.client.OpenSearchClient;
 import io.trino.plugin.opensearch.decoders.Decoder;
 import io.trino.spi.Page;
+import io.trino.spi.TrinoException;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.connector.ConnectorPageSource;
@@ -32,9 +33,13 @@ import java.util.Optional;
 
 import static com.google.common.base.Verify.verifyNotNull;
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static io.trino.plugin.opensearch.OpenSearchErrorCode.OPENSEARCH_QUERY_FAILURE;
 import static io.trino.plugin.opensearch.OpenSearchQueryBuilder.buildAggregationQuery;
 import static io.trino.plugin.opensearch.OpenSearchQueryBuilder.buildSearchQuery;
+import static io.trino.plugin.opensearch.OpenSearchQueryBuilder.buildUncoveredDocumentsQuery;
+import static io.trino.plugin.opensearch.OpenSearchSessionProperties.TEXT_GROUPBY_PUSHDOWN_ENABLED;
 import static java.util.Objects.requireNonNull;
+import static java.util.stream.Collectors.joining;
 
 public class AggregateQueryPageSource
         implements ConnectorPageSource
@@ -48,8 +53,10 @@ public class AggregateQueryPageSource
     private final List<String> columnNames;
     private final List<Decoder> decoders;
     private final QueryBuilder query;
+    private final Optional<QueryBuilder> uncoveredDocumentsQuery;
     private final int pageSize;
 
+    private boolean coverageVerified;
     private Optional<Map<String, Object>> after = Optional.empty();
     private boolean finished;
     private long readTimeNanos;
@@ -67,6 +74,7 @@ public class AggregateQueryPageSource
                 .map(DecoderDescriptor::createDecoder)
                 .collect(toImmutableList());
         this.query = buildSearchQuery(table.constraint().transformKeys(OpenSearchColumnHandle.class::cast), table.query(), table.regexes());
+        this.uncoveredDocumentsQuery = buildUncoveredDocumentsQuery(query, table.termAggregations());
         this.pageSize = pageSize;
     }
 
@@ -96,6 +104,10 @@ public class AggregateQueryPageSource
         }
 
         long start = System.nanoTime();
+        if (!coverageVerified) {
+            verifyKeywordSubFieldCoverage();
+            coverageVerified = true;
+        }
         SearchResponse response = client.beginAggregationSearch(
                 table.index(),
                 query,
@@ -136,6 +148,31 @@ public class AggregateQueryPageSource
             blocks[i] = builders[i].build();
         }
         return SourcePage.create(new Page(blocks));
+    }
+
+    /**
+     * Fails the query when a grouping on a {@code keyword} sub-field would count documents in the NULL group although
+     * their {@code text} column has a value, see {@link TermAggregation#fromKeywordSubField}. The count uses the same
+     * filter as the aggregation, so it only covers the documents being grouped, in one request for the whole query.
+     */
+    private void verifyKeywordSubFieldCoverage()
+    {
+        if (uncoveredDocumentsQuery.isEmpty()) {
+            return;
+        }
+        long uncovered = client.countDocuments(table.index(), uncoveredDocumentsQuery.get());
+        if (uncovered > 0) {
+            String columns = table.termAggregations().stream()
+                    .filter(termAggregation -> termAggregation.subField().isPresent())
+                    .map(TermAggregation::field)
+                    .collect(joining(", "));
+            throw new TrinoException(OPENSEARCH_QUERY_FAILURE, ("GROUP BY on text columns cannot be pushed down through their keyword sub-fields (%s): " +
+                    "%s matching documents have a value that is not indexed in the sub-field, because the value is longer than the ignore_above of the sub-field " +
+                    "or the document was indexed before the sub-field was added to the mapping. " +
+                    "Disable the catalog property opensearch.text-groupby-pushdown-enabled or the catalog session property %s, " +
+                    "or reindex the documents, for example with _update_by_query")
+                    .formatted(columns, uncovered, TEXT_GROUPBY_PUSHDOWN_ENABLED));
+        }
     }
 
     @Override

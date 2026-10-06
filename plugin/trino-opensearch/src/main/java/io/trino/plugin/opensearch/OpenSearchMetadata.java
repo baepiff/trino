@@ -120,6 +120,7 @@ import static io.trino.plugin.opensearch.OpenSearchErrorCode.OPENSEARCH_INVALID_
 import static io.trino.plugin.opensearch.OpenSearchSessionProperties.isAggregationPushdownEnabled;
 import static io.trino.plugin.opensearch.OpenSearchSessionProperties.isProjectionPushdownEnabled;
 import static io.trino.plugin.opensearch.OpenSearchSessionProperties.isTextEqualityPushdownEnabled;
+import static io.trino.plugin.opensearch.OpenSearchSessionProperties.isTextGroupByPushdownEnabled;
 import static io.trino.plugin.opensearch.OpenSearchTableHandle.Type.AGGREGATION;
 import static io.trino.plugin.opensearch.OpenSearchTableHandle.Type.SQL_AGGREGATION;
 import static io.trino.plugin.opensearch.PushdownColumns.isDocValuesPushdownSupported;
@@ -279,13 +280,15 @@ public class OpenSearchMetadata
         }
         for (IndexMetadata.Field field : fields) {
             TypeAndDecoder converted = toTrino(field);
+            Optional<IndexMetadata.SubField> keywordSubField = keywordSubField(field, converted.type(), converted.decoderDescriptor());
             result.put(field.name(), new OpenSearchColumnHandle(
                     ImmutableList.of(field.name()),
                     converted.type(),
                     field.type(),
                     converted.decoderDescriptor(),
                     supportsPredicates(field.type(), converted.type),
-                    keywordSubField(field, converted.type(), converted.decoderDescriptor())));
+                    keywordSubField,
+                    keywordSubField.isPresent() && field.presenceIndexed()));
         }
 
         return result.buildOrThrow();
@@ -585,9 +588,15 @@ public class OpenSearchMetadata
             return Optional.empty();
         }
 
+        boolean textGroupByPushdownEnabled = isTextGroupByPushdownEnabled(session);
         ImmutableList.Builder<TermAggregation> termAggregations = ImmutableList.builder();
         for (ColumnHandle columnHandle : groupingSets.getFirst()) {
-            Optional<TermAggregation> termAggregation = TermAggregation.fromColumn((OpenSearchColumnHandle) columnHandle);
+            OpenSearchColumnHandle column = (OpenSearchColumnHandle) columnHandle;
+            Optional<TermAggregation> termAggregation = TermAggregation.fromColumn(column);
+            if (termAggregation.isEmpty() && textGroupByPushdownEnabled) {
+                // the page source verifies that the sub-field covers every value before it returns any group
+                termAggregation = TermAggregation.fromKeywordSubField(column);
+            }
             if (termAggregation.isEmpty()) {
                 return Optional.empty();
             }

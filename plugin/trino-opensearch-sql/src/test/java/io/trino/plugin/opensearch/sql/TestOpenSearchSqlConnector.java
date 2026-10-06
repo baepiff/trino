@@ -422,6 +422,51 @@ public class TestOpenSearchSqlConnector
     }
 
     @Test
+    public void testGroupByTextFieldIsPushedThroughDslKeywordSubField()
+            throws IOException
+    {
+        String table = "test_sql_text_groupby_" + randomNameSuffix();
+        createIndex(table,
+                """
+                {
+                    "properties": {
+                        "tenant": {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 20}}},
+                        "i": {"type": "integer"}
+                    }
+                }
+                """);
+        try {
+            index(table, ImmutableMap.of("tenant", "tenant-a", "i", 1));
+            index(table, ImmutableMap.of("tenant", "tenant-a", "i", 3));
+            index(table, ImmutableMap.of("tenant", "Tenant-A", "i", 5));
+            index(table, ImmutableMap.of("tenant", "", "i", 7));
+            index(table, ImmutableMap.of("i", 9));
+
+            Session textGroupBy = Session.builder(getSession())
+                    .setCatalogSessionProperty(CATALOG, "text_groupby_pushdown_enabled", "true")
+                    .build();
+            String sql = "SELECT tenant, count(*), max(i) FROM " + table + " GROUP BY tenant";
+            String expected = "VALUES (CAST(NULL AS VARCHAR), BIGINT '1', 9), (CAST('' AS VARCHAR), BIGINT '1', 7), (CAST('Tenant-A' AS VARCHAR), BIGINT '1', 5), (CAST('tenant-a' AS VARCHAR), BIGINT '2', 3)";
+            assertThat(query(textGroupBy, sql))
+                    .matches(expected)
+                    .isFullyPushedDown();
+
+            // by default the grouping stays in Trino
+            assertThat(query(sql))
+                    .matches(expected)
+                    .isNotFullyPushedDown(AggregationNode.class);
+
+            // a value longer than ignore_above fails the pushed query instead of landing in the NULL group
+            index(table, ImmutableMap.of("tenant", "tenant-a-with-a-long-identifier", "i", 11));
+            assertThatThrownBy(() -> computeActual(textGroupBy, sql))
+                    .hasMessageContaining("1 matching documents have a value that is not indexed in the sub-field");
+        }
+        finally {
+            deleteIndex(table);
+        }
+    }
+
+    @Test
     public void testBigintAggregatesAndDistinctStayInTrino()
             throws IOException
     {
