@@ -74,6 +74,15 @@ connector adds the following property:
     [](opensearch-sql-statistical-precision). The catalog session property
     `statistical_pushdown_enabled` overrides this value for a session.
   - `false`
+* - `opensearch.sql.bigint-aggregation-pushdown-enabled`
+  - Push down `min`, `max`, `sum` and `avg` over `BIGINT` columns to the SQL
+    plugin. The plugin computes them with `double` values, which are exact only
+    up to 2^53, so a `min`, `max` or `sum` result with a magnitude of 2^53 or
+    more fails the query. See [](opensearch-sql-bigint-precision). Applies only
+    with `opensearch.sql.global-aggregation-engine=SQL`. The catalog session
+    property `bigint_aggregation_pushdown_enabled` overrides this value for a
+    session.
+  - `false`
 :::
 
 Aggregation push down as a whole can still be disabled with
@@ -116,11 +125,14 @@ of the OpenSearch connector, or to the processing in Trino.
 * - `count(column)`
   - Any column that supports predicate push down.
 * - `min(column)`, `max(column)`
-  - `TINYINT`, `SMALLINT`, `INTEGER`, `REAL`, `DOUBLE`
+  - `TINYINT`, `SMALLINT`, `INTEGER`, `REAL`, `DOUBLE`, and `BIGINT` only with
+    the opt-in property `opensearch.sql.bigint-aggregation-pushdown-enabled`.
 * - `sum(column)`, `avg(column)`
   - `DOUBLE`. Trino evaluates `sum` and `avg` of `TINYINT`, `SMALLINT` and
     `INTEGER` columns over a `BIGINT` cast of the column, and such a cast
     prevents the push down. These aggregates stay in Trino.
+    `BIGINT` columns only with the opt-in property
+    `opensearch.sql.bigint-aggregation-pushdown-enabled`.
 * - `stddev(column)`, `stddev_samp(column)`, `stddev_pop(column)`,
     `variance(column)`, `var_samp(column)`, `var_pop(column)`
   - `DOUBLE`, only when `opensearch.sql.statistical-pushdown-enabled` or the
@@ -134,9 +146,12 @@ The following operations stay in Trino:
 - Any aggregation with `GROUP BY`, `GROUPING SETS`, `CUBE` or `ROLLUP`. The
   OpenSearch connector pushes supported grouped aggregations down as search
   aggregations.
-- `min`, `max`, `sum` and `avg` over `BIGINT` columns. The connector does not
-  push them down because the aggregate values can exceed the range of
-  `DOUBLE` values that are represented exactly.
+- `min`, `max`, `sum` and `avg` over `BIGINT` columns, unless you enable
+  `opensearch.sql.bigint-aggregation-pushdown-enabled`. The statistical
+  functions over `BIGINT` columns always stay in Trino. With
+  `opensearch.sql.global-aggregation-engine=DSL` the `BIGINT` aggregates stay
+  in Trino as well, because the search aggregations of the OpenSearch
+  connector do not accept `BIGINT` columns.
 - Aggregates with `DISTINCT`, such as `count(DISTINCT column)`.
 - Aggregates over expressions rather than plain columns.
 - The statistical functions, unless their push down is enabled. If an
@@ -204,7 +219,7 @@ spread. In a test on OpenSearch 2.19.4 with 100 `double` values of the form
 `1e9 + (n mod 5)`, the plugin returned `0.0` for `stddev_pop`, `var_pop`,
 `stddev` and `variance`, where the exact results are `1.41421...`, `2.0`,
 `1.42134...` and `2.0202...`. Trino with push down disabled returned values that
-agree with the exact ones to better than 1e-8. Pushing the functions down by
+agree with the exact ones to within 1e-6. Pushing the functions down by
 default would silently return such wrong results.
 
 If your data has small spreads relative to the values, keep the default. If the
@@ -214,6 +229,44 @@ statistics, set the catalog property
 property `statistical_pushdown_enabled` to `true` for a session. An aggregation
 that contains a statistical function stays completely in Trino when the push
 down is not enabled, including the other aggregates of the same query.
+
+(opensearch-sql-bigint-precision)=
+### BIGINT aggregates
+
+The SQL plugin computes `min`, `max`, `sum` and `avg` with `double` values. A
+`double` represents every integer exactly only up to 2^53
+(9,007,199,254,740,992), so the plugin can return a rounded result for larger
+`BIGINT` values. Trino computes these aggregates over `BIGINT` columns exactly,
+and by default it does so for the connector too, which means it reads all rows
+of the column. On a large index this can take minutes, where the SQL plugin
+answers in a fraction of a second.
+
+Set `opensearch.sql.bigint-aggregation-pushdown-enabled=true`, or the catalog
+session property `bigint_aggregation_pushdown_enabled` to `true` for a session,
+to push these aggregates down. The setting has an effect only with
+`opensearch.sql.global-aggregation-engine=SQL`. The connector then checks the
+result of every pushed down `min`, `max` and `sum` over a `BIGINT` column:
+
+- A result with a magnitude below 2^53 is exact. For `min` and `max` the
+  result is one of the stored values, and a stored value below 2^53 is
+  represented exactly. A result that is a rounded value of a larger stored
+  value is at least 2^53, so it is detected.
+- For `sum` of values that all have the same sign, the partial sums grow
+  monotonically towards the result. If the result is below 2^53 then every
+  partial sum is below 2^53 and exact, so the result is exact.
+- A result with a magnitude of 2^53 or more may be rounded. The query then
+  fails with an error that names the aggregate function, the column, and the
+  settings. It does not contain data values. Add a filter that excludes the large
+  values, or set the property to `false` to let Trino compute the exact result.
+- `avg` over `BIGINT` returns a `DOUBLE` in Trino as well, so it is not
+  checked. For values above 2^53 the result can differ from the result of Trino
+  in the last digits.
+- A `NULL` result, which an empty input produces, is returned as is.
+
+The check examines only the final value. For a `sum` over values of mixed signs,
+an intermediate partial sum above 2^53 could be rounded in the SQL plugin while
+the final sum is below 2^53 again, and the check cannot detect this. Typical
+non-negative measures, such as durations or counts, are not affected.
 
 ## Limitations
 
