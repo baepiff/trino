@@ -1750,7 +1750,7 @@ public abstract class BaseOpenSearchConnectorTest
 
     @Test
     public void testTextFieldGroupByPushdownFailsOnValuesLongerThanIgnoreAbove()
-            throws IOException
+            throws Exception
     {
         String tableName = "test_text_groupby_ignore_above_" + randomNameSuffix();
         @Language("JSON")
@@ -1780,6 +1780,13 @@ public abstract class BaseOpenSearchConnectorTest
                     groupedQuery,
                     "\\QGROUP BY on text columns cannot be pushed down through their keyword sub-fields (tenant.keyword): 1 matching documents have a value that is not indexed in the sub-field\\E.*" +
                             "\\Qopensearch.text-groupby-pushdown-enabled\\E.*\\Qtext_groupby_pushdown_enabled\\E.*");
+            // also when the groups are read over several pages, each of which counts the uncovered documents
+            try (QueryAssertions assertions = new QueryAssertions(createAdHocQueryRunner(Map.of(
+                    "opensearch.max-aggregation-buckets", "1",
+                    "opensearch.text-groupby-pushdown-enabled", "true")))) {
+                assertThat(assertions.query(groupedQuery)).failure()
+                        .hasMessageMatching("\\QGROUP BY on text columns cannot be pushed down through their keyword sub-fields (tenant.keyword): 1 matching documents\\E.*");
+            }
 
             // the verification only covers the documents of the filter
             assertThat(query(textGroupByPushdown(), "SELECT tenant, count(*) FROM " + tableName + " WHERE id <> 2 GROUP BY tenant"))
@@ -1854,7 +1861,8 @@ public abstract class BaseOpenSearchConnectorTest
                             "normalized": { "type": "text", "fields": { "keyword": { "type": "keyword", "normalizer": "lower" } } },
                             "analyzed": { "type": "text", "fields": { "english": { "type": "text", "analyzer": "english" } } },
                             "plain": { "type": "text" },
-                            "not_indexed": { "type": "text", "index": false, "fields": { "keyword": { "type": "keyword" } } }
+                            "not_indexed": { "type": "text", "index": false, "fields": { "keyword": { "type": "keyword" } } },
+                            "no_doc_values": { "type": "text", "fields": { "keyword": { "type": "keyword", "doc_values": false } } }
                         }
                     }
                 }
@@ -1863,11 +1871,12 @@ public abstract class BaseOpenSearchConnectorTest
         request.setJsonEntity(settings);
         client.getLowLevelClient().performRequest(request);
         try {
-            index(tableName, ImmutableMap.of("id", 1, "normalized", "tenant-a", "analyzed", "tenant-a", "plain", "tenant-a", "not_indexed", "tenant-a"));
-            index(tableName, ImmutableMap.of("id", 2, "normalized", "Tenant-A", "analyzed", "Tenant-A", "plain", "Tenant-A", "not_indexed", "Tenant-A"));
+            index(tableName, Map.of("id", 1, "normalized", "tenant-a", "analyzed", "tenant-a", "plain", "tenant-a", "not_indexed", "tenant-a", "no_doc_values", "tenant-a"));
+            index(tableName, Map.of("id", 2, "normalized", "Tenant-A", "analyzed", "Tenant-A", "plain", "Tenant-A", "not_indexed", "Tenant-A", "no_doc_values", "Tenant-A"));
 
-            // a normalizer would merge the groups; without an indexed text field, uncovered documents could not be detected
-            for (String column : List.of("normalized", "analyzed", "plain", "not_indexed")) {
+            // a normalizer would merge the groups; without an indexed text field, uncovered documents could not be detected;
+            // without doc values, the terms source on the sub-field would fail where the query works in Trino
+            for (String column : List.of("normalized", "analyzed", "plain", "not_indexed", "no_doc_values")) {
                 assertThat(query(textGroupByPushdown(), "SELECT " + column + ", count(*) FROM " + tableName + " GROUP BY " + column))
                         .matches("VALUES (CAST('Tenant-A' AS VARCHAR), BIGINT '1'), (CAST('tenant-a' AS VARCHAR), BIGINT '1')")
                         .isNotFullyPushedDown(AggregationNode.class);
