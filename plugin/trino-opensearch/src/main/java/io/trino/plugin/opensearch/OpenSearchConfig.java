@@ -61,6 +61,7 @@ public class OpenSearchConfig
     private boolean verifyHostnames = true;
     private boolean projectionPushDownEnabled = true;
     private boolean aggregationPushdownEnabled = true;
+    private boolean textEqualityPushdownEnabled;
     private int maxAggregationBuckets = 65_535;
 
     private Security security;
@@ -352,6 +353,20 @@ public class OpenSearchConfig
     public OpenSearchConfig setAggregationPushdownEnabled(boolean aggregationPushdownEnabled)
     {
         this.aggregationPushdownEnabled = aggregationPushdownEnabled;
+        return this;
+    }
+
+    public boolean isTextEqualityPushdownEnabled()
+    {
+        return textEqualityPushdownEnabled;
+    }
+
+    @Config("opensearch.text-equality-pushdown.enabled")
+    @ConfigDescription("Push down equality predicates on text fields to their keyword sub-field. " +
+            "Assumes that all documents were indexed under the current sub-field mapping, otherwise rows can be missing from the results")
+    public OpenSearchConfig setTextEqualityPushdownEnabled(boolean textEqualityPushdownEnabled)
+    {
+        this.textEqualityPushdownEnabled = textEqualityPushdownEnabled;
         return this;
     }
 

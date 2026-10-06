@@ -1501,70 +1501,117 @@ public abstract class BaseOpenSearchConnectorTest
             index(tableName, ImmutableMap.of("id", 9, "tenant", "tenant a"));
 
             // equality is answered by the keyword sub-field; isFullyPushedDown also compares with the results computed by Trino
-            assertThat(query("SELECT id FROM " + tableName + " WHERE tenant = 'tenant-a'"))
+            assertThat(query(textEqualityPushdown(), "SELECT id FROM " + tableName + " WHERE tenant = 'tenant-a'"))
                     .matches("VALUES 1, 2")
                     .isFullyPushedDown();
             // case-sensitive like Trino, and not matched token by token like the text field
-            assertThat(query("SELECT id FROM " + tableName + " WHERE tenant = 'Tenant-A'"))
+            assertThat(query(textEqualityPushdown(), "SELECT id FROM " + tableName + " WHERE tenant = 'Tenant-A'"))
                     .matches("VALUES 3")
                     .isFullyPushedDown();
-            assertThat(query("SELECT id FROM " + tableName + " WHERE tenant = 'tenant a'"))
+            assertThat(query(textEqualityPushdown(), "SELECT id FROM " + tableName + " WHERE tenant = 'tenant a'"))
                     .matches("VALUES 9")
                     .isFullyPushedDown();
-            assertThat(query("SELECT id FROM " + tableName + " WHERE tenant = ''"))
+            assertThat(query(textEqualityPushdown(), "SELECT id FROM " + tableName + " WHERE tenant = ''"))
                     .matches("VALUES 8")
                     .isFullyPushedDown();
-            assertThat(query("SELECT id FROM " + tableName + " WHERE tenant IN ('tenant-a', 'tenant-b', 'no-such-tenant')"))
+            assertThat(query(textEqualityPushdown(), "SELECT id FROM " + tableName + " WHERE tenant IN ('tenant-a', 'tenant-b', 'no-such-tenant')"))
                     .matches("VALUES 1, 2, 4")
                     .isFullyPushedDown();
-            assertThat(query("SELECT id FROM " + tableName + " WHERE tenant = 'no-such-tenant'"))
+            assertThat(query(textEqualityPushdown(), "SELECT id FROM " + tableName + " WHERE tenant = 'no-such-tenant'"))
                     .returnsEmptyResult()
                     .isFullyPushedDown();
             // aggregations over the pushed filter are pushed as well
-            assertThat(query("SELECT count(*) FROM " + tableName + " WHERE tenant = 'tenant-a'"))
+            assertThat(query(textEqualityPushdown(), "SELECT count(*) FROM " + tableName + " WHERE tenant = 'tenant-a'"))
                     .matches("VALUES BIGINT '2'")
                     .isFullyPushedDown();
-            assertThat(query("SELECT count(*), max(id) FROM " + tableName + " WHERE tenant IN ('tenant-a', 'tenant-b')"))
+            assertThat(query(textEqualityPushdown(), "SELECT count(*), max(id) FROM " + tableName + " WHERE tenant IN ('tenant-a', 'tenant-b')"))
                     .matches("VALUES (BIGINT '3', 4)")
                     .isFullyPushedDown();
 
             // the sub-field does not index values longer than ignore_above, so these predicates stay in Trino
-            assertThat(query("SELECT id FROM " + tableName + " WHERE tenant = '" + longValue + "'"))
+            assertThat(query(textEqualityPushdown(), "SELECT id FROM " + tableName + " WHERE tenant = '" + longValue + "'"))
                     .matches("VALUES 5")
                     .isNotFullyPushedDown(FilterNode.class);
-            assertThat(query("SELECT id FROM " + tableName + " WHERE tenant IN ('tenant-a', '" + longValue + "')"))
+            assertThat(query(textEqualityPushdown(), "SELECT id FROM " + tableName + " WHERE tenant IN ('tenant-a', '" + longValue + "')"))
                     .matches("VALUES 1, 2, 5")
                     .isNotFullyPushedDown(FilterNode.class);
-            assertThat(query("SELECT count(*) FROM " + tableName + " WHERE tenant = '" + longValue + "'"))
+            assertThat(query(textEqualityPushdown(), "SELECT count(*) FROM " + tableName + " WHERE tenant = '" + longValue + "'"))
                     .matches("VALUES BIGINT '1'")
                     .isNotFullyPushedDown(FilterNode.class);
             // ranges, inequality and null checks stay in Trino
-            assertThat(query("SELECT id FROM " + tableName + " WHERE tenant <> 'tenant-a'"))
+            assertThat(query(textEqualityPushdown(), "SELECT id FROM " + tableName + " WHERE tenant <> 'tenant-a'"))
                     .matches("VALUES 3, 4, 5, 8, 9")
                     .isNotFullyPushedDown(FilterNode.class);
-            assertThat(query("SELECT id FROM " + tableName + " WHERE tenant > 'tenant-a'"))
+            assertThat(query(textEqualityPushdown(), "SELECT id FROM " + tableName + " WHERE tenant > 'tenant-a'"))
                     .matches("VALUES 4, 5")
                     .isNotFullyPushedDown(FilterNode.class);
-            assertThat(query("SELECT id FROM " + tableName + " WHERE tenant IS NULL"))
+            assertThat(query(textEqualityPushdown(), "SELECT id FROM " + tableName + " WHERE tenant IS NULL"))
                     .matches("VALUES 6, 7")
                     .isNotFullyPushedDown(FilterNode.class);
-            assertThat(query("SELECT id FROM " + tableName + " WHERE tenant IS NOT NULL AND id > 7"))
+            assertThat(query(textEqualityPushdown(), "SELECT id FROM " + tableName + " WHERE tenant IS NOT NULL AND id > 7"))
                     .matches("VALUES 8, 9")
                     .isNotFullyPushedDown(FilterNode.class);
-            assertThat(query("SELECT id FROM " + tableName + " WHERE tenant = 'tenant-a' OR tenant IS NULL"))
+            assertThat(query(textEqualityPushdown(), "SELECT id FROM " + tableName + " WHERE tenant = 'tenant-a' OR tenant IS NULL"))
                     .matches("VALUES 1, 2, 6, 7")
                     .isNotFullyPushedDown(FilterNode.class);
-            assertThat(query("SELECT id FROM " + tableName + " WHERE tenant LIKE 'tenant-%'"))
+            assertThat(query(textEqualityPushdown(), "SELECT id FROM " + tableName + " WHERE tenant LIKE 'tenant-%'"))
                     .matches("VALUES 1, 2, 4, 5")
                     .isNotFullyPushedDown(FilterNode.class);
             // a pushable and an unpushable predicate on the same column
-            assertThat(query("SELECT id FROM " + tableName + " WHERE tenant IN ('tenant-a', 'tenant-b') AND tenant LIKE '%b'"))
+            assertThat(query(textEqualityPushdown(), "SELECT id FROM " + tableName + " WHERE tenant IN ('tenant-a', 'tenant-b') AND tenant LIKE '%b'"))
                     .matches("VALUES 4")
                     .isNotFullyPushedDown(FilterNode.class);
         }
         finally {
             deleteIndex(tableName);
         }
+    }
+
+    @Test
+    public void testTextFieldEqualityIsNotPushedDownByDefault()
+            throws IOException
+    {
+        String tableName = "test_text_pushdown_default_off_" + randomNameSuffix();
+        @Language("JSON")
+        String properties =
+                """
+                {
+                    "properties": {
+                        "id": { "type": "integer" },
+                        "tenant": { "type": "text", "fields": { "keyword": { "type": "keyword", "ignore_above": 20 } } }
+                    }
+                }
+                """;
+
+        createIndex(tableName, properties);
+        try {
+            index(tableName, ImmutableMap.of("id", 1, "tenant", "tenant-a"));
+            index(tableName, ImmutableMap.of("id", 2, "tenant", "tenant-b"));
+            index(tableName, ImmutableMap.of("id", 3, "tenant", "tenant-a"));
+
+            // the switch is off by default, so the filter stays in Trino and the results are still correct
+            assertThat(query("SELECT id FROM " + tableName + " WHERE tenant = 'tenant-a'"))
+                    .matches("VALUES 1, 3")
+                    .isNotFullyPushedDown(FilterNode.class);
+            assertThat(query("SELECT id FROM " + tableName + " WHERE tenant IN ('tenant-a', 'tenant-b')"))
+                    .matches("VALUES 1, 2, 3")
+                    .isNotFullyPushedDown(FilterNode.class);
+
+            // and the session property turns the pushdown on
+            assertThat(query(textEqualityPushdown(), "SELECT id FROM " + tableName + " WHERE tenant = 'tenant-a'"))
+                    .matches("VALUES 1, 3")
+                    .isFullyPushedDown();
+        }
+        finally {
+            deleteIndex(tableName);
+        }
+    }
+
+    private Session textEqualityPushdown()
+    {
+        return Session.builder(getSession())
+                .setCatalogSessionProperty(getSession().getCatalog().orElseThrow(), "text_equality_pushdown_enabled", "true")
+                .build();
     }
 
     @Test
@@ -1598,10 +1645,10 @@ public abstract class BaseOpenSearchConnectorTest
 
             // a lower-case normalizer would also match 'Tenant-A', so the case-sensitive comparison stays in Trino
             for (String column : List.of("normalized", "analyzed", "plain")) {
-                assertThat(query("SELECT id FROM " + tableName + " WHERE " + column + " = 'tenant-a'"))
+                assertThat(query(textEqualityPushdown(), "SELECT id FROM " + tableName + " WHERE " + column + " = 'tenant-a'"))
                         .matches("VALUES 1")
                         .isNotFullyPushedDown(FilterNode.class);
-                assertThat(query("SELECT id FROM " + tableName + " WHERE " + column + " IN ('Tenant-A', 'x')"))
+                assertThat(query(textEqualityPushdown(), "SELECT id FROM " + tableName + " WHERE " + column + " IN ('Tenant-A', 'x')"))
                         .matches("VALUES 2")
                         .isNotFullyPushedDown(FilterNode.class);
             }

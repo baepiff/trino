@@ -80,6 +80,7 @@ import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
 public class TestOpenSearchMetadata
 {
     private static final ConnectorSession SESSION = session(true);
+    private static final ConnectorSession TEXT_EQUALITY_SESSION = textEqualitySession(new OpenSearchConfig(), true);
 
     private OpenSearchClient client;
     private OpenSearchMetadata metadata;
@@ -426,7 +427,7 @@ public class TestOpenSearchMetadata
         Domain regionkeyDomain = Domain.singleValue(BIGINT, 1L);
 
         ConstraintApplicationResult<ConnectorTableHandle> result = metadata.applyFilter(
-                        SESSION,
+                        TEXT_EQUALITY_SESSION,
                         scanHandle(),
                         new Constraint(TupleDomain.withColumnDomains(Map.of(tenant, tenantDomain, workspace, workspaceDomain, regionkey, regionkeyDomain))))
                 .orElseThrow();
@@ -437,7 +438,7 @@ public class TestOpenSearchMetadata
 
         // a second filter narrows the pushed values
         ConstraintApplicationResult<ConnectorTableHandle> narrowed = metadata.applyFilter(
-                        SESSION,
+                        TEXT_EQUALITY_SESSION,
                         new OpenSearchTableHandle(
                                 SCAN,
                                 "default",
@@ -508,9 +509,48 @@ public class TestOpenSearchMetadata
         assertThat(codec.fromJson(json)).isEqualTo(keyword);
     }
 
+    @Test
+    public void testApplyFilterKeepsTextPredicatesInTrinoByDefault()
+    {
+        OpenSearchColumnHandle tenant = textColumnWithKeyword("tenantId", OptionalInt.of(20));
+        OpenSearchColumnHandle regionkey = bigintColumn("regionkey");
+        Domain tenantDomain = Domain.singleValue(VARCHAR, utf8Slice("a"));
+        Domain regionkeyDomain = Domain.singleValue(BIGINT, 1L);
+
+        // the switch is off by default, so nothing is pushed for the text column
+        assertThat(metadata.applyFilter(SESSION, scanHandle(), new Constraint(TupleDomain.withColumnDomains(Map.of(tenant, tenantDomain))))).isEmpty();
+        assertThat(metadata.applyFilter(textEqualitySession(new OpenSearchConfig(), false), scanHandle(), new Constraint(TupleDomain.withColumnDomains(Map.of(tenant, tenantDomain))))).isEmpty();
+
+        // other columns are still pushed, and the text domain remains in the remaining filter
+        ConstraintApplicationResult<ConnectorTableHandle> result = metadata.applyFilter(
+                        SESSION,
+                        scanHandle(),
+                        new Constraint(TupleDomain.withColumnDomains(Map.of(tenant, tenantDomain, regionkey, regionkeyDomain))))
+                .orElseThrow();
+        assertThat(((OpenSearchTableHandle) result.getHandle()).constraint()).isEqualTo(TupleDomain.withColumnDomains(Map.of(regionkey, regionkeyDomain)));
+        assertThat(result.getRemainingFilter()).isEqualTo(TupleDomain.withColumnDomains(Map.of(tenant, tenantDomain)));
+    }
+
+    @Test
+    public void testTextEqualityPushdownSessionOverridesConfig()
+    {
+        OpenSearchColumnHandle tenant = textColumnWithKeyword("tenantId", OptionalInt.of(20));
+        Constraint constraint = new Constraint(TupleDomain.withColumnDomains(Map.of(tenant, Domain.singleValue(VARCHAR, utf8Slice("a")))));
+
+        // config on, session switches it off
+        OpenSearchConfig enabled = new OpenSearchConfig().setTextEqualityPushdownEnabled(true);
+        assertThat(metadata.applyFilter(textEqualitySession(enabled, null), scanHandle(), constraint)).isPresent();
+        assertThat(metadata.applyFilter(textEqualitySession(enabled, false), scanHandle(), constraint)).isEmpty();
+
+        // config off, session switches it on
+        OpenSearchConfig disabled = new OpenSearchConfig();
+        assertThat(metadata.applyFilter(textEqualitySession(disabled, null), scanHandle(), constraint)).isEmpty();
+        assertThat(metadata.applyFilter(textEqualitySession(disabled, true), scanHandle(), constraint)).isPresent();
+    }
+
     private void assertFullyPushed(OpenSearchColumnHandle column, Domain domain)
     {
-        ConstraintApplicationResult<ConnectorTableHandle> result = metadata.applyFilter(SESSION, scanHandle(), new Constraint(TupleDomain.withColumnDomains(Map.of(column, domain))))
+        ConstraintApplicationResult<ConnectorTableHandle> result = metadata.applyFilter(TEXT_EQUALITY_SESSION, scanHandle(), new Constraint(TupleDomain.withColumnDomains(Map.of(column, domain))))
                 .orElseThrow();
         assertThat(((OpenSearchTableHandle) result.getHandle()).constraint()).isEqualTo(TupleDomain.withColumnDomains(Map.of(column, domain)));
         assertThat(result.getRemainingFilter()).isEqualTo(TupleDomain.all());
@@ -519,7 +559,7 @@ public class TestOpenSearchMetadata
     private void assertNotPushed(OpenSearchColumnHandle column, Domain domain)
     {
         // nothing changes, so the filter stays in Trino
-        assertThat(metadata.applyFilter(SESSION, scanHandle(), new Constraint(TupleDomain.withColumnDomains(Map.of(column, domain))))).isEmpty();
+        assertThat(metadata.applyFilter(TEXT_EQUALITY_SESSION, scanHandle(), new Constraint(TupleDomain.withColumnDomains(Map.of(column, domain))))).isEmpty();
     }
 
     private static Optional<IndexMetadata.SubField> keywordSubField(IndexMetadata.Field field)
@@ -613,6 +653,20 @@ public class TestOpenSearchMetadata
     static OpenSearchColumnHandle textColumn(String name)
     {
         return new OpenSearchColumnHandle(List.of(name), VARCHAR, new IndexMetadata.PrimitiveType("text"), new VarcharDecoder.Descriptor(name), false);
+    }
+
+    /**
+     * A session whose defaults come from the given config, with the text equality session property overridden
+     * when {@code override} is not null.
+     */
+    static ConnectorSession textEqualitySession(OpenSearchConfig config, Boolean override)
+    {
+        TestingConnectorSession.Builder builder = TestingConnectorSession.builder()
+                .setPropertyMetadata(new OpenSearchSessionProperties(config).getSessionProperties());
+        if (override != null) {
+            builder.setPropertyValues(ImmutableMap.of("text_equality_pushdown_enabled", override));
+        }
+        return builder.build();
     }
 
     static ConnectorSession session(boolean aggregationPushdownEnabled)

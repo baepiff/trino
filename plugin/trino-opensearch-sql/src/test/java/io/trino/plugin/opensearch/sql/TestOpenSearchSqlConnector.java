@@ -394,18 +394,26 @@ public class TestOpenSearchSqlConnector
             index(table, ImmutableMap.of("i", 9, "d", 16.0));
 
             // predicates on text columns are never written as SQL, so the filter and the aggregation are pushed through the DSL
+            Session textPushdown = Session.builder(getSession())
+                    .setCatalogSessionProperty(CATALOG, "text_equality_pushdown_enabled", "true")
+                    .build();
             String sql = "SELECT count(*), max(i), sum(d) FROM " + table + " WHERE tenant = 'tenant-a'";
-            assertThat(query(sql))
+            assertThat(query(textPushdown, sql))
                     .matches("VALUES (BIGINT '2', 3, DOUBLE '3.0')")
                     .isFullyPushedDown();
-            assertPushedDownByDsl(getSession(), sql);
-            assertThat(query("SELECT count(*), max(i) FROM " + table + " WHERE tenant IN ('Tenant-A', 'tenant-b')"))
+            assertPushedDownByDsl(textPushdown, sql);
+            assertThat(query(textPushdown, "SELECT count(*), max(i) FROM " + table + " WHERE tenant IN ('Tenant-A', 'tenant-b')"))
                     .matches("VALUES (BIGINT '1', 5)")
                     .isFullyPushedDown();
 
             // a literal longer than ignore_above stays in Trino, and so does the aggregation
-            assertThat(query("SELECT count(*) FROM " + table + " WHERE tenant = 'tenant-a and more words'"))
+            assertThat(query(textPushdown, "SELECT count(*) FROM " + table + " WHERE tenant = 'tenant-a and more words'"))
                     .matches("VALUES BIGINT '1'")
+                    .isNotFullyPushedDown(FilterNode.class);
+
+            // by default the filter stays in Trino
+            assertThat(query(sql))
+                    .matches("VALUES (BIGINT '2', 3, DOUBLE '3.0')")
                     .isNotFullyPushedDown(FilterNode.class);
         }
         finally {

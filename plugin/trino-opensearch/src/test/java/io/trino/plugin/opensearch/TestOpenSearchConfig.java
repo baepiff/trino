@@ -59,6 +59,7 @@ public class TestOpenSearchConfig
                 .setIgnorePublishAddress(false)
                 .setProjectionPushdownEnabled(true)
                 .setAggregationPushdownEnabled(true)
+                .setTextEqualityPushdownEnabled(false)
                 .setMaxAggregationBuckets(65535)
                 .setSecurity(null));
     }
@@ -93,6 +94,7 @@ public class TestOpenSearchConfig
                 .put("opensearch.ignore-publish-address", "true")
                 .put("opensearch.projection-pushdown-enabled", "false")
                 .put("opensearch.aggregation-pushdown-enabled", "false")
+                .put("opensearch.text-equality-pushdown.enabled", "true")
                 .put("opensearch.max-aggregation-buckets", "1000")
                 .put("opensearch.security", "AWS")
                 .buildOrThrow();
@@ -120,6 +122,7 @@ public class TestOpenSearchConfig
                 .setIgnorePublishAddress(true)
                 .setProjectionPushdownEnabled(false)
                 .setAggregationPushdownEnabled(false)
+                .setTextEqualityPushdownEnabled(true)
                 .setMaxAggregationBuckets(1000)
                 .setSecurity(AWS);
 
