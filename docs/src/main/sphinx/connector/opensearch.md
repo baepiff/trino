@@ -512,7 +512,44 @@ following data types:
   - `TIMESTAMP`
 :::
 
-No other data types are supported for predicate push down.
+No other data types are supported for predicate push down, with one exception
+for `text` fields described in the next section.
+
+#### Equality on `text` fields with a `keyword` sub-field
+
+Dynamic mapping, and many explicit mappings, index a string as a `text` field
+with a `keyword` sub-field, for example:
+
+```json
+"tenantId": {
+  "type": "text",
+  "fields": { "keyword": { "type": "keyword", "ignore_above": 256 } }
+}
+```
+
+A predicate on such a column that uses `=` or `IN` is pushed down as a `term`
+or `terms` query on the `keyword` sub-field, for example on `tenantId.keyword`.
+The query returns the same rows as the comparison in Trino, which is
+case-sensitive and compares the whole value. The predicate is pushed down only
+when all of the following hold:
+
+* The column is a top-level `text` field mapped to `VARCHAR`, without an array
+  or raw JSON transform.
+* The field has a sub-field of type `keyword` that is indexed and has no
+  `normalizer` and no `null_value`. A normalizer, such as a lowercase
+  normalizer, changes the indexed terms.
+* Every literal is at most `ignore_above` characters long, or at most 32766
+  bytes in UTF-8 when the sub-field does not set `ignore_above`. A longer value
+  is not indexed in the sub-field, so the predicate stays in Trino to return
+  the documents with such a value.
+* The predicate lists at most 1024 values, and does not also accept `NULL`.
+* When the table is an alias or a wildcard table, every index behind it maps the
+  field and the sub-field identically. No field is copied into the field or the
+  sub-field with `copy_to`.
+
+Range predicates such as `<`, `>`, `<>` and `BETWEEN`, `LIKE`, and `IS NULL`
+and `IS NOT NULL` on `text` fields are not pushed down, and are evaluated by
+Trino. Grouping, sorting and aggregations on `text` fields are not pushed down.
 
 (opensearch-aggregation-pushdown)=
 ### Aggregation push down
