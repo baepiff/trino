@@ -647,30 +647,50 @@ every document with a value also has that value in the sub-field. A document
 lacks it when its value is longer than the `ignore_above` of the sub-field, or
 when the document was indexed before the sub-field was added to the mapping.
 Such a document would be counted in the `NULL` group instead of its own group.
-The mapping does not show whether such documents exist, so before it returns
-any group the connector sends one extra count request to OpenSearch, with the
-same filter as the aggregation, for documents that have a value for the field
-but none in the sub-field. If there are any, the query fails with an error that
-reports their number. To run such a query, disable the push down for the
+The mapping does not show whether such documents exist, so every aggregation
+request that the connector sends to OpenSearch also counts, among the documents
+of the query, those that have a value for the field but none in the sub-field.
+The count is computed in the same search as the groups of the request, so no
+extra request is needed, and a document indexed while the groups are read over
+several requests is counted as well. If there are any such documents, the query
+fails with an error that reports their number; the first request fails before
+any group is returned. To run such a query, disable the push down for the
 session, or reindex the documents, for example with `_update_by_query`, so that
 the sub-field covers them. Documents excluded by the `WHERE` clause do not fail
 the query. When the equality push down for `text` fields is enabled as well,
 documents that its filter omits, as described in
 [](opensearch-text-equality-pushdown), are neither grouped nor counted.
 
-The count request cannot find a value that is in `_source` but not indexed for
-the `text` field itself. This happens when the index does not map new fields
+The count cannot find a value that is in `_source` but not indexed for the
+`text` field itself. This happens when the index does not map new fields
 dynamically, `"dynamic": false`, and the field was added to the mapping after
-the documents were indexed. Such documents are counted in the `NULL` group. A
-document whose value is an array is counted in the group of each element, while
-reading it without the push down fails, as for `keyword` columns.
+the documents were indexed. Such documents are counted in the `NULL` group. The
+connector decides whether the push down applies when it plans the query, from
+the mappings of the indices behind the table at that time. When an index is
+added to an alias or matches a wildcard table while the query runs, and maps
+the field with `"index": false`, its documents are counted in the `NULL` group
+without an error. An index added that way without the sub-field fails the query
+instead.
+
+Avoid this push down for fields whose `_source` values can be arrays. Reading
+such a document without the push down fails, as for `keyword` columns, while
+the push down groups it by the elements indexed in the sub-field: it is counted
+in the group of each element that is not longer than `ignore_above`. The
+elements that are longer are not detected, as long as one element is indexed.
+For example, a document with `["short", "<value longer than ignore_above>"]`
+is only counted in the group `short`, and does not fail the query. A number or
+a boolean in `_source` of a `text` field is grouped by its text in the
+sub-field, which can differ from the value that Trino reads without the push
+down: `1.50` forms the group `1.50` while Trino reads `1.5`, and `true` forms
+the group `true` while reading it without the push down fails.
 
 The push down is applied when the column and its sub-field meet the conditions
 for the equality push down listed in [](opensearch-text-equality-pushdown), and
 additionally the `text` field is indexed, without `"index": false`, and keeps
 its norms, or the index keeps the `_field_names` meta field. These are the
-defaults; the count request relies on them to find the documents that have a
-value. A document whose value is the empty string, or only consists of
+defaults; the count relies on them to find the documents that have a value.
+The sub-field must also keep its doc values, the default, which the grouping
+reads; with `doc_values: false` the grouping stays in Trino. A document whose value is the empty string, or only consists of
 characters that the analyzer drops, also counts as having a value. Documents
 without the field or with a `null` value form the `NULL` group, and the empty
 string forms a group of its own, as in Trino. Grouping by `text` and other
