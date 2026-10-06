@@ -264,6 +264,93 @@ public class TestOpenSearchQueryBuilder
                         .subAggregation(AggregationBuilders.max("_pushdown_0").field("score")));
     }
 
+    @Test
+    public void testGroupingOnKeywordSubField()
+            throws IOException
+    {
+        List<AggregationBuilder> builders = buildAggregationQuery(
+                ImmutableList.of(new TermAggregation("tenantId", VARCHAR, Optional.of("keyword")), new TermAggregation("name", VARCHAR)),
+                ImmutableList.of(new MetricAggregation("count", BIGINT, Optional.empty(), "_pushdown_0")),
+                10,
+                Optional.of(ImmutableMap.of("tenantId", "a", "name", "b")));
+
+        // the source reads the sub-field but keeps the column name, which names the keys of the buckets and of the after key
+        assertThat(builders).containsExactly(
+                new CompositeAggregationBuilder(
+                        "groupBy",
+                        ImmutableList.of(
+                                new TermsValuesSourceBuilder("tenantId").field("tenantId.keyword").missingBucket(true),
+                                new TermsValuesSourceBuilder("name").field("name").missingBucket(true)))
+                        .size(10)
+                        .aggregateAfter(ImmutableMap.of("tenantId", "a", "name", "b")));
+        assertThat(JSON_MAPPER.readTree(builders.getFirst().toString())).isEqualTo(JSON_MAPPER.readTree(
+                """
+                {"groupBy": {"composite": {
+                  "size": 10,
+                  "sources": [
+                    {"tenantId": {"terms": {"field": "tenantId.keyword", "missing_bucket": true, "order": "asc"}}},
+                    {"name": {"terms": {"field": "name", "missing_bucket": true, "order": "asc"}}}
+                  ],
+                  "after": {"tenantId": "a", "name": "b"}
+                }}}
+                """));
+    }
+
+    @Test
+    public void testUncoveredDocumentsQuery()
+            throws IOException
+    {
+        QueryBuilder filter = buildSearchQuery(ImmutableMap.of(AGE, Domain.singleValue(INTEGER, 1L)));
+
+        // nothing to verify without a grouping on a sub-field
+        assertThat(OpenSearchQueryBuilder.buildUncoveredDocumentsQuery(filter, ImmutableList.of(new TermAggregation("name", VARCHAR)))).isEmpty();
+        assertThat(OpenSearchQueryBuilder.buildUncoveredDocumentsQuery(filter, ImmutableList.of())).isEmpty();
+
+        // the documents of the aggregation filter with a value for the column but no term in the sub-field
+        QueryBuilder single = OpenSearchQueryBuilder.buildUncoveredDocumentsQuery(
+                        filter,
+                        ImmutableList.of(new TermAggregation("tenantId", VARCHAR, Optional.of("keyword")), new TermAggregation("name", VARCHAR)))
+                .orElseThrow();
+        assertJson(single,
+                """
+                {"bool": {
+                  "filter": [
+                    {"bool": {"filter": [{"term": {"age": {"value": 1, "boost": 1.0}}}], "adjust_pure_negative": true, "boost": 1.0}},
+                    {"bool": {
+                      "filter": [{"exists": {"field": "tenantId", "boost": 1.0}}],
+                      "must_not": [{"exists": {"field": "tenantId.keyword", "boost": 1.0}}],
+                      "adjust_pure_negative": true, "boost": 1.0}}
+                  ],
+                  "adjust_pure_negative": true, "boost": 1.0}}
+                """);
+
+        // with several such columns, a document is uncovered when any of its values is
+        QueryBuilder several = OpenSearchQueryBuilder.buildUncoveredDocumentsQuery(
+                        new MatchAllQueryBuilder(),
+                        ImmutableList.of(new TermAggregation("tenantId", VARCHAR, Optional.of("keyword")), new TermAggregation("title", VARCHAR, Optional.of("raw"))))
+                .orElseThrow();
+        assertJson(several,
+                """
+                {"bool": {
+                  "filter": [
+                    {"match_all": {"boost": 1.0}},
+                    {"bool": {
+                      "should": [
+                        {"bool": {
+                          "filter": [{"exists": {"field": "tenantId", "boost": 1.0}}],
+                          "must_not": [{"exists": {"field": "tenantId.keyword", "boost": 1.0}}],
+                          "adjust_pure_negative": true, "boost": 1.0}},
+                        {"bool": {
+                          "filter": [{"exists": {"field": "title", "boost": 1.0}}],
+                          "must_not": [{"exists": {"field": "title.raw", "boost": 1.0}}],
+                          "adjust_pure_negative": true, "boost": 1.0}}
+                      ],
+                      "adjust_pure_negative": true, "minimum_should_match": "1", "boost": 1.0}}
+                  ],
+                  "adjust_pure_negative": true, "boost": 1.0}}
+                """);
+    }
+
     private static void assertQueryBuilder(Map<OpenSearchColumnHandle, Domain> domains, QueryBuilder expected)
     {
         QueryBuilder actual = OpenSearchQueryBuilder.buildSearchQuery(TupleDomain.withColumnDomains(domains), Optional.empty(), Map.of());
