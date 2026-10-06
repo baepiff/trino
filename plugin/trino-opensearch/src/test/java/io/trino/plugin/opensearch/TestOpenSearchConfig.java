@@ -94,7 +94,7 @@ public class TestOpenSearchConfig
                 .put("opensearch.ignore-publish-address", "true")
                 .put("opensearch.projection-pushdown-enabled", "false")
                 .put("opensearch.aggregation-pushdown-enabled", "false")
-                .put("opensearch.text-equality-pushdown.enabled", "true")
+                .put("opensearch.text-equality-pushdown-enabled", "true")
                 .put("opensearch.max-aggregation-buckets", "1000")
                 .put("opensearch.security", "AWS")
                 .buildOrThrow();
