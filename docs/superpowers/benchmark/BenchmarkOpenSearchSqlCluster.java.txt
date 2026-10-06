@@ -1,0 +1,306 @@
+/*
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package io.trino.plugin.opensearch.sql;
+
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.net.HostAndPort;
+import io.trino.testing.DistributedQueryRunner;
+import io.trino.testing.MaterializedResult;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
+
+import java.net.URI;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+
+/**
+ * Manual end-to-end latency benchmark against an external cluster. Skipped unless OS_SQL_URL is set.
+ * Not intended to be committed.
+ */
+@EnabledIfEnvironmentVariable(named = "OS_SQL_URL", matches = ".+")
+public class BenchmarkOpenSearchSqlCluster
+{
+    private static final String TABLE = "process_composer_request";
+    private static final int FAST_ROUNDS = 25;
+    private static final int SLOW_ROUNDS = 3;
+    private static final long SLOW_THRESHOLD_MILLIS = 20_000;
+    private static final long QUERY_TIMEOUT_MINUTES = Long.parseLong(System.getenv().getOrDefault("OS_BENCH_TIMEOUT_MIN", "10"));
+
+    private static final class Measurement
+    {
+        private final String label;
+        private final String sql;
+        private String pushdown = "?";
+        private int maxRounds = FAST_ROUNDS;
+        private boolean abandoned;
+        private long rows = -1;
+        private String error = "";
+        private String tenantPushed = "?";
+        private String fullError = "";
+        private long warmupMillis;
+        private final List<Long> timings = new ArrayList<>();
+        private int failures;
+
+        private Measurement(String label, String sql)
+        {
+            this.label = label;
+            this.sql = sql;
+        }
+    }
+
+    @Test
+    public void benchmark()
+            throws Exception
+    {
+        URI uri = URI.create(System.getenv("OS_SQL_URL"));
+        int port = uri.getPort() == -1 ? 443 : uri.getPort();
+        boolean tls = "https".equals(uri.getScheme());
+        String tenant = System.getenv("OS_BENCH_TENANT");
+        String user = System.getenv("OS_SQL_USER");
+        String password = System.getenv("OS_SQL_PASSWORD");
+        String outputPath = System.getenv().getOrDefault("OS_BENCH_OUT", "C:/Users/joongjin.bae/AppData/Local/Temp/claude/C--github-trino/ed25540f-db12-4457-aa0c-b07cd21f409f/scratchpad/trino-bench-final.md");
+        boolean options = !"off".equals(System.getenv("OS_BENCH_OPTIONS"));
+        int roundsCap = Integer.parseInt(System.getenv().getOrDefault("OS_BENCH_ROUNDS", String.valueOf(FAST_ROUNDS)));
+
+        ImmutableMap.Builder<String, String> extra = ImmutableMap.builder();
+        extra.put("opensearch.tls.enabled", Boolean.toString(tls));
+        extra.put("opensearch.aggregation-pushdown-enabled", "true");
+        if (options) {
+            extra.put("opensearch.text-equality-pushdown-enabled", "true");
+            extra.put("opensearch.sql.bigint-aggregation-pushdown-enabled", "true");
+            extra.put("opensearch.text-groupby-pushdown-enabled", "true");
+        }
+        System.out.println("OPTIONS " + (options ? "on" : "off") + " rounds-cap=" + roundsCap);
+        if (user != null && !user.isEmpty()) {
+            extra.put("opensearch.security", "PASSWORD");
+            extra.put("opensearch.auth.user", user);
+            extra.put("opensearch.auth.password", password == null ? "" : password);
+        }
+
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try (DistributedQueryRunner queryRunner = OpenSearchSqlQueryRunner.create(HostAndPort.fromParts(uri.getHost(), port), extra.buildOrThrow())) {
+            System.out.println("DESCRIBE: " + queryRunner.execute("DESCRIBE " + TABLE).getMaterializedRows());
+            System.out.println("trivial: " + queryRunner.execute("SELECT count(*) FROM " + TABLE).getMaterializedRows());
+
+            Map<String, Measurement> measurements = new LinkedHashMap<>();
+            String t = " WHERE tenantid = '" + tenant + "'";
+            add(measurements, "A count(*)", "SELECT count(*) FROM " + TABLE);
+            add(measurements, "B min(requestduration)", "SELECT min(requestduration) FROM " + TABLE);
+            add(measurements, "C max(requestduration)", "SELECT max(requestduration) FROM " + TABLE);
+            add(measurements, "D sum(requestduration)", "SELECT sum(requestduration) FROM " + TABLE);
+            add(measurements, "E avg(requestduration)", "SELECT avg(requestduration) FROM " + TABLE);
+            add(measurements, "F count(*) WHERE tenant", "SELECT count(*) FROM " + TABLE + t);
+            add(measurements, "G sum(requestduration) WHERE tenant", "SELECT sum(requestduration) FROM " + TABLE + t);
+            add(measurements, "H max(requestduration) WHERE tenant", "SELECT max(requestduration) FROM " + TABLE + t);
+            add(measurements, "I top10 WHERE tenant", "SELECT requestcreateddate FROM " + TABLE + t + " ORDER BY requestcreateddate DESC LIMIT 10");
+            add(measurements, "J top10", "SELECT requestcreateddate FROM " + TABLE + " ORDER BY requestcreateddate DESC LIMIT 10");
+            add(measurements, "K GROUP BY workspacetype", "SELECT workspacetype, count(*) FROM " + TABLE + " GROUP BY workspacetype");
+            add(measurements, "L GROUP BY workspacetype WHERE tenant", "SELECT workspacetype, count(*) FROM " + TABLE + t + " GROUP BY workspacetype");
+
+            if ("true".equals(System.getenv("OS_BENCH_SKIP_SLOW"))) {
+                measurements.keySet().removeIf(label -> label.contains("requestduration"));
+            }
+
+            String only = System.getenv("OS_BENCH_ONLY");
+            if (only != null && !only.isEmpty()) {
+                List<String> wanted = List.of(only.split(","));
+                measurements.keySet().removeIf(label -> wanted.stream().noneMatch(w -> label.equals(w) || label.startsWith(w + " ")));
+            }
+
+            // plan type
+            for (Measurement measurement : measurements.values()) {
+                try {
+                    String plan = queryRunner.execute("EXPLAIN " + measurement.sql).getOnlyValue().toString();
+                    if (plan.contains("SQL_AGGREGATION")) {
+                        measurement.pushdown = "SQL_AGGREGATION";
+                    }
+                    else if (plan.contains("AGGREGATION:")) {
+                        measurement.pushdown = "SEARCH_AGGREGATION";
+                    }
+                    else if (plan.contains("TopN[") || plan.contains("Limit[")) {
+                        measurement.pushdown = "NONE (sort/limit in Trino; scan fetches all rows)";
+                    }
+                    else if (measurement.sql.contains("LIMIT")) {
+                        measurement.pushdown = "SCAN_TOPN_PUSHED";
+                    }
+                    else {
+                        measurement.pushdown = "NONE";
+                    }
+                    boolean filterNode = plan.contains("Filter[") || plan.contains("ScanFilter");
+                    boolean tenantInPlan = plan.contains(tenant);
+                    measurement.tenantPushed = measurement.sql.contains("tenantid") ? (tenantInPlan && !filterNode ? "yes" : "no (filterNode=" + filterNode + ", tenantInPlan=" + tenantInPlan + ")") : "n/a";
+                    System.out.println("PLANTEXT " + measurement.label + " " + plan.replace(tenant, "<tenant>"));
+                }
+                catch (RuntimeException e) {
+                    measurement.pushdown = "EXPLAIN_FAILED";
+                    measurement.error = String.valueOf(e.getMessage());
+                }
+                System.out.println("PLAN " + measurement.label + " -> " + measurement.pushdown);
+            }
+
+            // warm-up, sequential
+            for (Measurement measurement : measurements.values()) {
+                long start = System.nanoTime();
+                String outcome = runWithTimeout(executor, queryRunner, measurement);
+                long millis = (System.nanoTime() - start) / 1_000_000;
+                System.out.println("WARMUP " + measurement.label + " " + outcome + " " + millis + " ms rows=" + measurement.rows + " " + abbreviate(measurement.error));
+                measurement.warmupMillis = millis;
+                if (!outcome.equals("OK")) {
+                    measurement.fullError = outcome + " after " + millis + " ms: " + measurement.error;
+                    measurement.abandoned = true;
+                    measurement.error = outcome + " " + measurement.error;
+                }
+                else if (millis > SLOW_THRESHOLD_MILLIS) {
+                    measurement.maxRounds = SLOW_ROUNDS;
+                }
+                measurement.maxRounds = Math.min(measurement.maxRounds, roundsCap);
+            }
+
+            for (int round = 0; round < roundsCap; round++) {
+                for (Measurement measurement : measurements.values()) {
+                    if (measurement.abandoned || round >= measurement.maxRounds) {
+                        continue;
+                    }
+                    long start = System.nanoTime();
+                    String outcome = runWithTimeout(executor, queryRunner, measurement);
+                    long millis = (System.nanoTime() - start) / 1_000_000;
+                    if (outcome.equals("OK")) {
+                        measurement.timings.add(millis);
+                    }
+                    else {
+                        measurement.failures++;
+                        measurement.error = outcome + " " + measurement.error;
+                        if (outcome.equals("TIMEOUT")) {
+                            measurement.abandoned = true;
+                        }
+                    }
+                    Thread.sleep(500);
+                }
+                System.out.println("round " + (round + 1) + " done");
+            }
+
+            report(measurements, outputPath);
+        }
+        finally {
+            executor.shutdownNow();
+        }
+    }
+
+    private static void add(Map<String, Measurement> measurements, String label, String sql)
+    {
+        measurements.put(label, new Measurement(label, sql));
+    }
+
+    private static String runWithTimeout(ExecutorService executor, DistributedQueryRunner queryRunner, Measurement measurement)
+    {
+        Future<MaterializedResult> future = executor.submit(() -> queryRunner.execute(measurement.sql));
+        try {
+            MaterializedResult result = future.get(QUERY_TIMEOUT_MINUTES, TimeUnit.MINUTES);
+            measurement.rows = result.getRowCount();
+            if (measurement.label.startsWith("K ") || measurement.label.startsWith("L ")) {
+                List<String> printed = new ArrayList<>();
+                result.getMaterializedRows().forEach(row -> printed.add(String.valueOf(row)));
+                Collections.sort(printed);
+                System.out.println("RESULTSET " + measurement.label.substring(0, 1) + " groups=" + printed.size() + " " + printed);
+            }
+            if (measurement.sql.startsWith("SELECT count(*)")) {
+                System.out.println("COUNTVALUE " + measurement.label + " = " + result.getMaterializedRows().get(0).getField(0));
+            }
+            return "OK";
+        }
+        catch (TimeoutException e) {
+            future.cancel(true);
+            return "TIMEOUT";
+        }
+        catch (Exception e) {
+            Throwable cause = e.getCause() == null ? e : e.getCause();
+            measurement.error = cause.getClass().getSimpleName() + ": " + cause.getMessage();
+            if (System.getenv("OS_BENCH_TENANT") != null) {
+                measurement.error = measurement.error.replace(System.getenv("OS_BENCH_TENANT"), "<tenant>");
+            }
+            for (Throwable t = cause; t != null; t = t.getCause()) {
+                System.out.println("ERRCHAIN " + t.getClass().getName() + ": " + t.getMessage() + " @ " + (t.getStackTrace().length > 0 ? t.getStackTrace()[0] : ""));
+            }
+            return "FAILED";
+        }
+    }
+
+    private static void report(Map<String, Measurement> measurements, String outputPath)
+            throws Exception
+    {
+        ImmutableList.Builder<String> lines = ImmutableList.builder();
+        lines.add("| query | pushdown | tenant pushed | warmup ms | rounds | ok | rows | min | p50 | mean | p95 | max (ms) |");
+        lines.add("|---|---|---|---|---|---|---|---|---|---|---|---|");
+        for (Measurement measurement : measurements.values()) {
+            List<Long> sorted = new ArrayList<>(measurement.timings);
+            Collections.sort(sorted);
+            int rounds = measurement.abandoned ? 0 : measurement.maxRounds;
+            String note = measurement.maxRounds == SLOW_ROUNDS ? " (slow: 3 rounds)" : "";
+            if (sorted.isEmpty()) {
+                lines.add("| %s | %s | %s | %s | %s | 0 | %s | - | - | - | - | - |  %s |".formatted(
+                        measurement.label, measurement.pushdown, measurement.tenantPushed, measurement.warmupMillis, rounds, measurement.rows, abbreviate(measurement.error)));
+                continue;
+            }
+            double mean = sorted.stream().mapToLong(Long::longValue).average().orElse(0);
+            lines.add("| %s%s | %s | %s | %s | %s | %s | %s | %s | %s | %.0f | %s | %s |".formatted(
+                    measurement.label,
+                    note,
+                    measurement.pushdown,
+                    measurement.tenantPushed,
+                    measurement.warmupMillis,
+                    rounds,
+                    sorted.size(),
+                    measurement.rows,
+                    sorted.getFirst(),
+                    percentile(sorted, 0.50),
+                    mean,
+                    percentile(sorted, 0.95),
+                    sorted.getLast()));
+        }
+        StringBuilder errors = new StringBuilder();
+        for (Measurement measurement : measurements.values()) {
+            if (!measurement.fullError.isEmpty()) {
+                errors.append("\n### ").append(measurement.label).append("\n\n").append(measurement.fullError).append("\n");
+            }
+        }
+        String table = String.join("\n", lines.build()) + (errors.length() > 0 ? "\n\n## Errors\n" + errors : "");
+        System.out.println(table);
+        if (outputPath != null && !outputPath.isEmpty()) {
+            Files.writeString(Path.of(outputPath), "# Trino opensearch_sql end-to-end benchmark (options " + System.getenv().getOrDefault("OS_BENCH_OPTIONS", "on") + ")\n\n" + table + "\n");
+        }
+    }
+
+    private static String abbreviate(String text)
+    {
+        String single = text.replace('\n', ' ').replace('|', '/');
+        return single.length() > 200 ? single.substring(0, 200) : single;
+    }
+
+    private static long percentile(List<Long> sorted, double fraction)
+    {
+        int index = (int) Math.ceil(fraction * sorted.size()) - 1;
+        return sorted.get(Math.max(0, Math.min(index, sorted.size() - 1)));
+    }
+}
