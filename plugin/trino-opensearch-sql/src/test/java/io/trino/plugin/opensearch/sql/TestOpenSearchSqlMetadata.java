@@ -44,14 +44,18 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
+import org.opensearch.index.query.BoolQueryBuilder;
+import org.opensearch.index.query.TermQueryBuilder;
 
 import java.io.IOException;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.Set;
 
 import static io.airlift.slice.Slices.utf8Slice;
+import static io.trino.plugin.opensearch.OpenSearchQueryBuilder.buildSearchQuery;
 import static io.trino.plugin.opensearch.OpenSearchTableHandle.Type.AGGREGATION;
 import static io.trino.plugin.opensearch.OpenSearchTableHandle.Type.QUERY;
 import static io.trino.plugin.opensearch.OpenSearchTableHandle.Type.SCAN;
@@ -275,6 +279,42 @@ public class TestOpenSearchSqlMetadata
 
         // a LIKE-derived regexp cannot be turned back into SQL
         assertThat(applyGlobal(session, scanHandle(TupleDomain.all(), Map.of("kind", "a.*")), List.of(countStar()))).isEqualTo(AGGREGATION);
+    }
+
+    @Test
+    public void testTextColumnFilterFallsBackToDslWithKeywordSubField()
+    {
+        // a text column whose equality predicates are pushed through its keyword sub-field
+        OpenSearchColumnHandle tenant = new OpenSearchColumnHandle(
+                List.of("tenantName"),
+                VARCHAR,
+                new IndexMetadata.PrimitiveType("text"),
+                new VarcharDecoder.Descriptor("tenantName"),
+                false,
+                Optional.of(new IndexMetadata.SubField("keyword", "keyword", OptionalInt.of(256), Optional.empty(), true, false)));
+        TupleDomain<ColumnHandle> constraint = TupleDomain.withColumnDomains(Map.of(tenant, Domain.singleValue(VARCHAR, utf8Slice("tenant-a"))));
+
+        // predicates on text columns are not rendered as SQL, even when they are pushed through the keyword sub-field
+        assertThat(SqlWhereRenderer.render(constraint.transformKeys(OpenSearchColumnHandle.class::cast))).isEmpty();
+
+        for (GlobalAggregationEngine engine : GlobalAggregationEngine.values()) {
+            OpenSearchTableHandle handle = (OpenSearchTableHandle) apply(
+                    session(engine, true),
+                    scanHandle(constraint, Map.of()),
+                    List.of(countStar(), function("max", INTEGER, "version", INTEGER)),
+                    List.of(List.of()))
+                    .orElseThrow()
+                    .getHandle();
+
+            // the aggregation is still pushed, through the DSL, and filters on the keyword sub-field
+            assertThat(handle.type()).as(engine.name()).isEqualTo(AGGREGATION);
+            assertThat(handle.constraint()).isEqualTo(constraint);
+            assertThat(buildSearchQuery(handle.constraint().transformKeys(OpenSearchColumnHandle.class::cast), handle.query(), handle.regexes()))
+                    .isEqualTo(new BoolQueryBuilder().filter(new TermQueryBuilder("tenantName.keyword", "tenant-a")));
+        }
+
+        // statistical functions need the SQL engine, so they stay in Trino
+        assertThat(apply(session(GlobalAggregationEngine.SQL, true), scanHandle(constraint, Map.of()), List.of(function("stddev", DOUBLE, "duration", DOUBLE)), List.of(List.of()))).isEmpty();
     }
 
     @Test
