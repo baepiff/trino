@@ -90,7 +90,7 @@ The following table details all general configuration properties:
   - Push down supported aggregations to OpenSearch. The catalog session property
     `aggregation_pushdown_enabled` overrides this value for a session.
   - `true`
-* - `opensearch.text-equality-pushdown.enabled`
+* - `opensearch.text-equality-pushdown-enabled`
   - Push down equality predicates on `text` fields with a `keyword` sub-field,
     see [](opensearch-text-equality-pushdown). The catalog session property
     `text_equality_pushdown_enabled` overrides this value for a session.
@@ -533,7 +533,7 @@ with a `keyword` sub-field, for example:
 }
 ```
 
-This push down is disabled by default. Set `opensearch.text-equality-pushdown.enabled`
+This push down is disabled by default. Set `opensearch.text-equality-pushdown-enabled`
 to `true` in the catalog, or the catalog session property
 `text_equality_pushdown_enabled` to `true` for a session, to enable it.
 

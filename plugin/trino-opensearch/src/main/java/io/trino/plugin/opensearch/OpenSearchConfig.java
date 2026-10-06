@@ -361,7 +361,7 @@ public class OpenSearchConfig
         return textEqualityPushdownEnabled;
     }
 
-    @Config("opensearch.text-equality-pushdown.enabled")
+    @Config("opensearch.text-equality-pushdown-enabled")
     @ConfigDescription("Push down equality predicates on text fields to their keyword sub-field. " +
             "Assumes that all documents were indexed under the current sub-field mapping, otherwise rows can be missing from the results")
     public OpenSearchConfig setTextEqualityPushdownEnabled(boolean textEqualityPushdownEnabled)
