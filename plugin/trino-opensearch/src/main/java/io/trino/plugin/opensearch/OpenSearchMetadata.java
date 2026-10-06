@@ -119,6 +119,7 @@ import static io.trino.plugin.base.projection.ApplyProjectionUtil.replaceWithNew
 import static io.trino.plugin.opensearch.OpenSearchErrorCode.OPENSEARCH_INVALID_METADATA;
 import static io.trino.plugin.opensearch.OpenSearchSessionProperties.isAggregationPushdownEnabled;
 import static io.trino.plugin.opensearch.OpenSearchSessionProperties.isProjectionPushdownEnabled;
+import static io.trino.plugin.opensearch.OpenSearchSessionProperties.isTextEqualityPushdownEnabled;
 import static io.trino.plugin.opensearch.OpenSearchTableHandle.Type.AGGREGATION;
 import static io.trino.plugin.opensearch.PushdownColumns.isDocValuesPushdownSupported;
 import static io.trino.spi.StandardErrorCode.INVALID_FUNCTION_ARGUMENT;
@@ -660,6 +661,7 @@ public class OpenSearchMetadata
             return Optional.empty();
         }
 
+        boolean textEqualityPushdownEnabled = isTextEqualityPushdownEnabled(session);
         Map<ColumnHandle, Domain> supported = new HashMap<>();
         Map<ColumnHandle, Domain> unsupported = new HashMap<>();
         Map<ColumnHandle, Domain> domains = constraint.getSummary().getDomains().orElseThrow(() -> new IllegalArgumentException("constraint summary is NONE"));
@@ -669,7 +671,7 @@ public class OpenSearchMetadata
             if (column.supportsPredicates()) {
                 supported.put(column, entry.getValue());
             }
-            else if (column.keywordSubField().isPresent() && isKeywordSubFieldPushdownExact(entry.getValue(), column.keywordSubField().get())) {
+            else if (textEqualityPushdownEnabled && column.keywordSubField().isPresent() && isKeywordSubFieldPushdownExact(entry.getValue(), column.keywordSubField().get())) {
                 supported.put(column, entry.getValue());
             }
             else {
