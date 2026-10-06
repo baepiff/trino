@@ -378,7 +378,7 @@ public class OpenSearchConfig
 
     @Config("opensearch.text-groupby-pushdown-enabled")
     @ConfigDescription("Push down GROUP BY on text fields to their keyword sub-field. " +
-            "Assumes that the sub-field covers every value; one extra request per query verifies it and fails the query when a value " +
+            "Assumes that the sub-field covers every value; every aggregation request verifies it and fails the query when a value " +
             "is longer than ignore_above or was indexed before the sub-field was added")
     public OpenSearchConfig setTextGroupByPushdownEnabled(boolean textGroupByPushdownEnabled)
     {

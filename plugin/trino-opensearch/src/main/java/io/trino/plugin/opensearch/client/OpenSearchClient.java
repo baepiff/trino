@@ -95,7 +95,6 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import static com.google.common.base.Preconditions.checkArgument;
-import static com.google.common.base.Verify.verifyNotNull;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
@@ -610,7 +609,8 @@ public class OpenSearchClient
                     ignoreAboveValue,
                     normalizer,
                     indexed == null || indexed.asBoolean(true),
-                    value.has("null_value")));
+                    value.has("null_value"),
+                    value.path("doc_values").asBoolean(true)));
         }
         return result.build();
     }
@@ -830,17 +830,6 @@ public class OpenSearchClient
                 .source(sourceBuilder);
 
         return search(request);
-    }
-
-    /**
-     * Counts the documents matching the query over all shards of the index expression in one request, failing
-     * instead of returning a partial count when a shard fails.
-     */
-    public long countDocuments(String index, QueryBuilder query)
-    {
-        SearchResponse response = beginAggregationSearch(index, query, ImmutableList.of());
-        verifyNotNull(response.getHits().getTotalHits(), "Total hits are missing from the count response");
-        return response.getHits().getTotalHits().value();
     }
 
     private SearchResponse search(SearchRequest request)

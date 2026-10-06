@@ -38,7 +38,8 @@ public record IndexMetadata(ObjectType schema)
      * @param presenceIndexed whether an {@code exists} query on the {@code text} field matches every document with a
      *         value for it, including an empty string, in every index behind the table: the field is indexed, and
      *         either keeps its norms or the index keeps the {@code _field_names} meta field; only determined for
-     *         top-level fields, and only meaningful for {@code text} fields
+     *         top-level fields, and only meaningful for {@code text} fields; {@code false} when not determined, as for
+     *         handles serialized before it was
      */
     public record Field(boolean asRawJson, boolean isArray, String name, Type type, List<SubField> subFields, boolean presenceIndexed)
     {
@@ -57,7 +58,7 @@ public record IndexMetadata(ObjectType schema)
 
         public Field(boolean asRawJson, boolean isArray, String name, Type type, List<SubField> subFields)
         {
-            this(asRawJson, isArray, name, type, subFields, true);
+            this(asRawJson, isArray, name, type, subFields, false);
         }
 
         public Field(boolean asRawJson, boolean isArray, String name, Type type)
@@ -68,9 +69,13 @@ public record IndexMetadata(ObjectType schema)
 
     /**
      * A multi-field of a mapped field, for example the {@code keyword} sub-field that dynamic mapping adds to
-     * every {@code text} field. Only the mapping parameters that affect which terms are indexed are kept.
+     * every {@code text} field. Only the mapping parameters that affect which terms are indexed, or whether they can be
+     * aggregated on, are kept.
+     *
+     * @param docValues whether the sub-field keeps doc values, which a terms aggregation on it reads; {@code false} when
+     *         not determined, as for handles serialized before it was
      */
-    public record SubField(String name, String type, OptionalInt ignoreAbove, Optional<String> normalizer, boolean indexed, boolean hasNullValue)
+    public record SubField(String name, String type, OptionalInt ignoreAbove, Optional<String> normalizer, boolean indexed, boolean hasNullValue, boolean docValues)
     {
         @JsonCreator
         public SubField

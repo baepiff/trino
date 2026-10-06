@@ -404,7 +404,7 @@ public class TestOpenSearchSqlMetadata
                 new IndexMetadata.PrimitiveType("text"),
                 new VarcharDecoder.Descriptor("tenantName"),
                 false,
-                Optional.of(new IndexMetadata.SubField("keyword", "keyword", OptionalInt.of(256), Optional.empty(), true, false)));
+                Optional.of(new IndexMetadata.SubField("keyword", "keyword", OptionalInt.of(256), Optional.empty(), true, false, true)));
         TupleDomain<ColumnHandle> constraint = TupleDomain.withColumnDomains(Map.of(tenant, Domain.singleValue(VARCHAR, utf8Slice("tenant-a"))));
 
         // predicates on text columns are not rendered as SQL, even when they are pushed through the keyword sub-field
@@ -439,7 +439,7 @@ public class TestOpenSearchSqlMetadata
                 new IndexMetadata.PrimitiveType("text"),
                 new VarcharDecoder.Descriptor("tenantName"),
                 false,
-                Optional.of(new IndexMetadata.SubField("keyword", "keyword", OptionalInt.of(256), Optional.empty(), true, false)),
+                Optional.of(new IndexMetadata.SubField("keyword", "keyword", OptionalInt.of(256), Optional.empty(), true, false, true)),
                 true);
 
         // off by default

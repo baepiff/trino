@@ -68,6 +68,7 @@ import static java.time.format.DateTimeFormatter.ISO_DATE_TIME;
 public final class OpenSearchQueryBuilder
 {
     public static final String COMPOSITE_AGGREGATION_NAME = "groupBy";
+    public static final String UNCOVERED_DOCUMENTS_AGGREGATION_NAME = "_uncovered";
 
     private OpenSearchQueryBuilder() {}
 
@@ -96,16 +97,22 @@ public final class OpenSearchQueryBuilder
                 .size(pageSize);
         after.ifPresent(composite::aggregateAfter);
         metrics.forEach(composite::subAggregation);
-        return ImmutableList.of(composite);
+        Optional<QueryBuilder> uncoveredDocuments = buildUncoveredDocumentsQuery(termAggregations);
+        if (uncoveredDocuments.isEmpty()) {
+            return ImmutableList.of(composite);
+        }
+        // a sibling of the composite aggregation, computed over all documents of the query in the same request as every
+        // page of buckets, so that no document indexed between two requests can slip into the NULL group unnoticed
+        return ImmutableList.of(composite, AggregationBuilders.filter(UNCOVERED_DOCUMENTS_AGGREGATION_NAME, uncoveredDocuments.get()));
     }
 
     /**
-     * Matches the documents of the filter that have a value for a {@code text} grouping column but no term in the
-     * {@code keyword} sub-field grouped on instead, because the value is longer than the {@code ignore_above} of the
-     * sub-field, or because the document was indexed before the sub-field was added. The composite aggregation would
-     * count these documents in the NULL group. Empty when no grouping column reads a sub-field.
+     * Matches the documents that have a value for a {@code text} grouping column but no term in the {@code keyword}
+     * sub-field grouped on instead, because the value is longer than the {@code ignore_above} of the sub-field, or
+     * because the document was indexed before the sub-field was added. The composite aggregation would count these
+     * documents in the NULL group. Empty when no grouping column reads a sub-field.
      */
-    public static Optional<QueryBuilder> buildUncoveredDocumentsQuery(QueryBuilder filter, List<TermAggregation> termAggregations)
+    public static Optional<QueryBuilder> buildUncoveredDocumentsQuery(List<TermAggregation> termAggregations)
     {
         List<QueryBuilder> uncovered = termAggregations.stream()
                 .filter(termAggregation -> termAggregation.subField().isPresent())
@@ -116,14 +123,12 @@ public final class OpenSearchQueryBuilder
         if (uncovered.isEmpty()) {
             return Optional.empty();
         }
-
-        BoolQueryBuilder query = new BoolQueryBuilder().filter(filter);
         if (uncovered.size() == 1) {
-            return Optional.of(query.filter(getOnlyElement(uncovered)));
+            return Optional.of(getOnlyElement(uncovered));
         }
         BoolQueryBuilder anyUncovered = new BoolQueryBuilder().minimumShouldMatch(1);
         uncovered.forEach(anyUncovered::should);
-        return Optional.of(query.filter(anyUncovered));
+        return Optional.of(anyUncovered);
     }
 
     private static Optional<AggregationBuilder> buildMetricAggregation(MetricAggregation aggregation)

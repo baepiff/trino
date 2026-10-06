@@ -74,13 +74,15 @@ public record TermAggregation(String term, Type type, Optional<String> subField)
      * Groups a {@code text} column by its {@code keyword} sub-field. The groups are the same as Trino's only if the
      * sub-field indexes the value of every document that has one: a value longer than the {@code ignore_above} of the
      * sub-field, or indexed before the sub-field was added to the mapping, is missing from the sub-field and would be
-     * counted in the NULL group. The mapping cannot tell, so the page source counts such documents with an
-     * {@code exists} query on the column before it returns any group and fails the query if there are any, which
-     * requires the presence of a value to be indexed for the column.
+     * counted in the NULL group. The mapping cannot tell, so every aggregation request also counts such documents with
+     * an {@code exists} query on the column and the page source fails the query if there are any, which requires the
+     * presence of a value to be indexed for the column. The sub-field must keep its doc values, which the terms source
+     * of the composite aggregation reads.
      */
     public static Optional<TermAggregation> fromKeywordSubField(OpenSearchColumnHandle column)
     {
         if (column.keywordSubField().isEmpty()
+                || !column.keywordSubField().get().docValues()
                 || !column.presenceIndexed()
                 || isBuiltinColumn(column.name())
                 || !column.type().equals(VARCHAR)) {

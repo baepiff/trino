@@ -594,7 +594,7 @@ public class OpenSearchMetadata
             OpenSearchColumnHandle column = (OpenSearchColumnHandle) columnHandle;
             Optional<TermAggregation> termAggregation = TermAggregation.fromColumn(column);
             if (termAggregation.isEmpty() && textGroupByPushdownEnabled) {
-                // the page source verifies that the sub-field covers every value before it returns any group
+                // the page source verifies with every page that the sub-field covers every value, before it returns any group of the page
                 termAggregation = TermAggregation.fromKeywordSubField(column);
             }
             if (termAggregation.isEmpty()) {

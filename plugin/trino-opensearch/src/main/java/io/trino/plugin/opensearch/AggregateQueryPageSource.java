@@ -26,6 +26,8 @@ import io.trino.spi.connector.SourcePage;
 import org.opensearch.action.search.SearchResponse;
 import org.opensearch.index.query.QueryBuilder;
 import org.opensearch.search.SearchHit;
+import org.opensearch.search.aggregations.Aggregations;
+import org.opensearch.search.aggregations.bucket.filter.Filter;
 
 import java.util.List;
 import java.util.Map;
@@ -34,9 +36,9 @@ import java.util.Optional;
 import static com.google.common.base.Verify.verifyNotNull;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.plugin.opensearch.OpenSearchErrorCode.OPENSEARCH_QUERY_FAILURE;
+import static io.trino.plugin.opensearch.OpenSearchQueryBuilder.UNCOVERED_DOCUMENTS_AGGREGATION_NAME;
 import static io.trino.plugin.opensearch.OpenSearchQueryBuilder.buildAggregationQuery;
 import static io.trino.plugin.opensearch.OpenSearchQueryBuilder.buildSearchQuery;
-import static io.trino.plugin.opensearch.OpenSearchQueryBuilder.buildUncoveredDocumentsQuery;
 import static io.trino.plugin.opensearch.OpenSearchSessionProperties.TEXT_GROUPBY_PUSHDOWN_ENABLED;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.joining;
@@ -53,10 +55,9 @@ public class AggregateQueryPageSource
     private final List<String> columnNames;
     private final List<Decoder> decoders;
     private final QueryBuilder query;
-    private final Optional<QueryBuilder> uncoveredDocumentsQuery;
+    private final boolean verifyKeywordSubFieldCoverage;
     private final int pageSize;
 
-    private boolean coverageVerified;
     private Optional<Map<String, Object>> after = Optional.empty();
     private boolean finished;
     private long readTimeNanos;
@@ -74,7 +75,7 @@ public class AggregateQueryPageSource
                 .map(DecoderDescriptor::createDecoder)
                 .collect(toImmutableList());
         this.query = buildSearchQuery(table.constraint().transformKeys(OpenSearchColumnHandle.class::cast), table.query(), table.regexes());
-        this.uncoveredDocumentsQuery = buildUncoveredDocumentsQuery(query, table.termAggregations());
+        this.verifyKeywordSubFieldCoverage = table.termAggregations().stream().anyMatch(termAggregation -> termAggregation.subField().isPresent());
         this.pageSize = pageSize;
     }
 
@@ -104,10 +105,6 @@ public class AggregateQueryPageSource
         }
 
         long start = System.nanoTime();
-        if (!coverageVerified) {
-            verifyKeywordSubFieldCoverage();
-            coverageVerified = true;
-        }
         SearchResponse response = client.beginAggregationSearch(
                 table.index(),
                 query,
@@ -115,6 +112,9 @@ public class AggregateQueryPageSource
         readTimeNanos += System.nanoTime() - start;
 
         verifyNotNull(response.getHits().getTotalHits(), "Total hits are missing from the aggregation response");
+        if (verifyKeywordSubFieldCoverage) {
+            verifyKeywordSubFieldCoverage(response);
+        }
         Result result = AggregationResponseReader.read(
                 response.getAggregations(),
                 response.getHits().getTotalHits().value(),
@@ -152,15 +152,16 @@ public class AggregateQueryPageSource
 
     /**
      * Fails the query when a grouping on a {@code keyword} sub-field would count documents in the NULL group although
-     * their {@code text} column has a value, see {@link TermAggregation#fromKeywordSubField}. The count uses the same
-     * filter as the aggregation, so it only covers the documents being grouped, in one request for the whole query.
+     * their {@code text} column has a value, see {@link TermAggregation#fromKeywordSubField}. Every page request counts
+     * these documents among the documents of the query, in the same search as the buckets of the page, see
+     * {@link OpenSearchQueryBuilder#buildAggregationQuery}. The first page fails before any group is returned, a later
+     * page when such a document was indexed while the pages were read.
      */
-    private void verifyKeywordSubFieldCoverage()
+    private void verifyKeywordSubFieldCoverage(SearchResponse response)
     {
-        if (uncoveredDocumentsQuery.isEmpty()) {
-            return;
-        }
-        long uncovered = client.countDocuments(table.index(), uncoveredDocumentsQuery.get());
+        Aggregations aggregations = verifyNotNull(response.getAggregations(), "Aggregations are missing from the aggregation response");
+        Filter uncoveredDocuments = verifyNotNull(aggregations.get(UNCOVERED_DOCUMENTS_AGGREGATION_NAME), "Count of the documents not covered by the keyword sub-fields is missing from the aggregation response");
+        long uncovered = uncoveredDocuments.getDocCount();
         if (uncovered > 0) {
             String columns = table.termAggregations().stream()
                     .filter(termAggregation -> termAggregation.subField().isPresent())
