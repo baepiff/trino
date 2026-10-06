@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.opensearch;
 
+import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableList;
@@ -21,23 +22,40 @@ import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.type.Type;
 
 import java.util.List;
+import java.util.Optional;
 
 import static java.util.Objects.requireNonNull;
 
+/**
+ * @param keywordSubField a {@code keyword} sub-field of a {@code text} column whose terms are exactly the column
+ *         values, so that equality predicates on the column can be answered by the sub-field; see
+ *         {@link OpenSearchMetadata#keywordSubField}
+ */
 public record OpenSearchColumnHandle(
         List<String> path,
         Type type,
         IndexMetadata.Type opensearchType,
         DecoderDescriptor decoderDescriptor,
-        boolean supportsPredicates)
+        boolean supportsPredicates,
+        Optional<IndexMetadata.SubField> keywordSubField)
         implements ColumnHandle
 {
+    @JsonCreator
     public OpenSearchColumnHandle
     {
         path = ImmutableList.copyOf(path);
         requireNonNull(type, "type is null");
         requireNonNull(opensearchType, "opensearchType is null");
         requireNonNull(decoderDescriptor, "decoderDescriptor is null");
+        // absent in handles serialized before the sub-field was retained
+        if (keywordSubField == null) {
+            keywordSubField = Optional.empty();
+        }
+    }
+
+    public OpenSearchColumnHandle(List<String> path, Type type, IndexMetadata.Type opensearchType, DecoderDescriptor decoderDescriptor, boolean supportsPredicates)
+    {
+        this(path, type, opensearchType, decoderDescriptor, supportsPredicates, Optional.empty());
     }
 
     @JsonIgnore

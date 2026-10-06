@@ -13,9 +13,15 @@
  */
 package io.trino.plugin.opensearch;
 
+import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.fasterxml.jackson.databind.module.SimpleModule;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import io.airlift.json.JsonCodec;
+import io.airlift.json.JsonCodecFactory;
+import io.airlift.json.JsonMapperProvider;
 import io.airlift.slice.Slices;
+import io.trino.plugin.base.TypeDeserializer;
 import io.trino.plugin.opensearch.TopN.TopNSortItem;
 import io.trino.plugin.opensearch.client.IndexMetadata;
 import io.trino.plugin.opensearch.client.OpenSearchClient;
@@ -31,13 +37,18 @@ import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.Constraint;
+import io.trino.spi.connector.ConstraintApplicationResult;
 import io.trino.spi.connector.LimitApplicationResult;
 import io.trino.spi.connector.SortItem;
 import io.trino.spi.connector.SortOrder;
 import io.trino.spi.connector.TopNApplicationResult;
 import io.trino.spi.expression.Variable;
 import io.trino.spi.predicate.Domain;
+import io.trino.spi.predicate.Range;
 import io.trino.spi.predicate.TupleDomain;
+import io.trino.spi.predicate.ValueSet;
+import io.trino.spi.type.ArrayType;
+import io.trino.spi.type.Type;
 import io.trino.testing.TestingConnectorSession;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -48,7 +59,12 @@ import java.io.IOException;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
+import java.util.Set;
+import java.util.stream.IntStream;
 
+import static com.google.common.collect.ImmutableList.toImmutableList;
+import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.plugin.opensearch.OpenSearchTableHandle.Type.QUERY;
 import static io.trino.plugin.opensearch.OpenSearchTableHandle.Type.SCAN;
 import static io.trino.spi.type.BigintType.BIGINT;
@@ -353,6 +369,183 @@ public class TestOpenSearchMetadata
         // the same constraint is accepted for a scan, so the rejection is caused by the aggregation
         assertThat(metadata.applyFilter(SESSION, scanHandle(), constraint)).isPresent();
         assertThat(metadata.applyFilter(SESSION, aggregationHandle(), constraint)).isEmpty();
+    }
+
+    @Test
+    public void testApplyFilterPushesEqualityOnTextColumnWithKeywordSubField()
+    {
+        OpenSearchColumnHandle tenant = textColumnWithKeyword("tenantId", OptionalInt.of(20));
+
+        Domain single = Domain.singleValue(VARCHAR, utf8Slice("tenant-a"));
+        assertFullyPushed(tenant, single);
+
+        Domain list = Domain.multipleValues(VARCHAR, List.of(utf8Slice("a"), utf8Slice("b"), utf8Slice("c")));
+        assertFullyPushed(tenant, list);
+
+        // the longest literal the sub-field can index, counted in characters
+        assertFullyPushed(tenant, Domain.singleValue(VARCHAR, utf8Slice("a".repeat(20))));
+        assertFullyPushed(tenant, Domain.singleValue(VARCHAR, utf8Slice("é".repeat(20))));
+        // without ignore_above only Lucene's term length limit applies
+        assertFullyPushed(textColumnWithKeyword("tenantId", OptionalInt.empty()), Domain.singleValue(VARCHAR, utf8Slice("a".repeat(32766))));
+    }
+
+    @Test
+    public void testApplyFilterKeepsInexactTextPredicatesInTrino()
+    {
+        OpenSearchColumnHandle tenant = textColumnWithKeyword("tenantId", OptionalInt.of(20));
+
+        // a longer literal can only equal values the sub-field did not index
+        assertNotPushed(tenant, Domain.singleValue(VARCHAR, utf8Slice("a".repeat(21))));
+        // one character outside the basic multilingual plane counts as two
+        assertNotPushed(textColumnWithKeyword("tenantId", OptionalInt.of(1)), Domain.singleValue(VARCHAR, utf8Slice("😀")));
+        // one unindexable value keeps the whole list in Trino
+        assertNotPushed(tenant, Domain.multipleValues(VARCHAR, List.of(utf8Slice("a"), utf8Slice("b".repeat(21)))));
+        assertNotPushed(textColumnWithKeyword("tenantId", OptionalInt.empty()), Domain.singleValue(VARCHAR, utf8Slice("a".repeat(32767))));
+        // ranges, including <>, would miss the values the sub-field did not index
+        assertNotPushed(tenant, Domain.create(ValueSet.ofRanges(Range.greaterThan(VARCHAR, utf8Slice("a"))), false));
+        assertNotPushed(tenant, Domain.create(ValueSet.ofRanges(Range.lessThan(VARCHAR, utf8Slice("a")), Range.greaterThan(VARCHAR, utf8Slice("a"))), false));
+        assertNotPushed(tenant, Domain.create(ValueSet.ofRanges(Range.equal(VARCHAR, utf8Slice("a")), Range.greaterThan(VARCHAR, utf8Slice("m"))), false));
+        // null checks
+        assertNotPushed(tenant, Domain.onlyNull(VARCHAR));
+        assertNotPushed(tenant, Domain.notNull(VARCHAR));
+        assertNotPushed(tenant, Domain.singleValue(VARCHAR, utf8Slice("a"), true));
+        // very long lists
+        assertNotPushed(tenant, Domain.multipleValues(VARCHAR, IntStream.range(0, 1025).mapToObj(value -> utf8Slice(String.valueOf(value))).collect(toImmutableList())));
+        // text columns without a suitable sub-field
+        assertNotPushed(textColumn("description"), Domain.singleValue(VARCHAR, utf8Slice("a")));
+    }
+
+    @Test
+    public void testApplyFilterPushesOnlyTheExactTextColumns()
+    {
+        OpenSearchColumnHandle tenant = textColumnWithKeyword("tenantId", OptionalInt.of(20));
+        OpenSearchColumnHandle workspace = textColumnWithKeyword("workspaceType", OptionalInt.of(20));
+        OpenSearchColumnHandle regionkey = bigintColumn("regionkey");
+        Domain tenantDomain = Domain.singleValue(VARCHAR, utf8Slice("a"));
+        Domain workspaceDomain = Domain.create(ValueSet.ofRanges(Range.greaterThan(VARCHAR, utf8Slice("a"))), false);
+        Domain regionkeyDomain = Domain.singleValue(BIGINT, 1L);
+
+        ConstraintApplicationResult<ConnectorTableHandle> result = metadata.applyFilter(
+                        SESSION,
+                        scanHandle(),
+                        new Constraint(TupleDomain.withColumnDomains(Map.of(tenant, tenantDomain, workspace, workspaceDomain, regionkey, regionkeyDomain))))
+                .orElseThrow();
+
+        assertThat(((OpenSearchTableHandle) result.getHandle()).constraint())
+                .isEqualTo(TupleDomain.withColumnDomains(Map.of(tenant, tenantDomain, regionkey, regionkeyDomain)));
+        assertThat(result.getRemainingFilter()).isEqualTo(TupleDomain.withColumnDomains(Map.of(workspace, workspaceDomain)));
+
+        // a second filter narrows the pushed values
+        ConstraintApplicationResult<ConnectorTableHandle> narrowed = metadata.applyFilter(
+                        SESSION,
+                        new OpenSearchTableHandle(
+                                SCAN,
+                                "default",
+                                "nation",
+                                TupleDomain.withColumnDomains(Map.of(tenant, Domain.multipleValues(VARCHAR, List.of(utf8Slice("a"), utf8Slice("b"))))),
+                                Map.of(),
+                                Optional.empty(),
+                                Optional.empty(),
+                                Set.of(),
+                                List.of(),
+                                List.of()),
+                        new Constraint(TupleDomain.withColumnDomains(Map.of(tenant, tenantDomain))))
+                .orElseThrow();
+        assertThat(((OpenSearchTableHandle) narrowed.getHandle()).constraint()).isEqualTo(TupleDomain.withColumnDomains(Map.of(tenant, tenantDomain)));
+    }
+
+    @Test
+    public void testKeywordSubFieldSelection()
+    {
+        IndexMetadata.SubField keyword = subField("keyword", "keyword", OptionalInt.of(256), Optional.empty());
+        assertThat(keywordSubField(textField(keyword))).hasValue(keyword);
+        IndexMetadata.SubField unlimited = subField("raw", "keyword", OptionalInt.empty(), Optional.empty());
+        assertThat(keywordSubField(textField(unlimited))).hasValue(unlimited);
+
+        // the sub-field indexing the longest values wins
+        assertThat(keywordSubField(textField(keyword, unlimited))).hasValue(unlimited);
+        IndexMetadata.SubField shorter = subField("short", "keyword", OptionalInt.of(10), Optional.empty());
+        assertThat(keywordSubField(textField(shorter, keyword))).hasValue(keyword);
+
+        // a normalizer changes the indexed terms
+        assertThat(keywordSubField(textField(subField("keyword", "keyword", OptionalInt.of(256), Optional.of("lowercase"))))).isEmpty();
+        // only keyword sub-fields index the value as one term
+        assertThat(keywordSubField(textField(subField("english", "text", OptionalInt.empty(), Optional.empty())))).isEmpty();
+        assertThat(keywordSubField(textField(subField("wildcard", "wildcard", OptionalInt.empty(), Optional.empty())))).isEmpty();
+        // not indexed, or indexing a term for missing values
+        assertThat(keywordSubField(textField(new IndexMetadata.SubField("keyword", "keyword", OptionalInt.of(256), Optional.empty(), false, false)))).isEmpty();
+        assertThat(keywordSubField(textField(new IndexMetadata.SubField("keyword", "keyword", OptionalInt.of(256), Optional.empty(), true, true)))).isEmpty();
+        // nothing can be indexed
+        assertThat(keywordSubField(textField(subField("keyword", "keyword", OptionalInt.of(0), Optional.empty())))).isEmpty();
+        // a text field without sub-fields
+        assertThat(keywordSubField(textField())).isEmpty();
+
+        // keyword columns support predicates directly, and other columns are not read as a plain VARCHAR
+        assertThat(OpenSearchMetadata.keywordSubField(new IndexMetadata.Field(false, false, "a", new IndexMetadata.PrimitiveType("keyword"), List.of(keyword)), VARCHAR, new VarcharDecoder.Descriptor("a"))).isEmpty();
+        assertThat(OpenSearchMetadata.keywordSubField(new IndexMetadata.Field(true, false, "a", new IndexMetadata.PrimitiveType("text"), List.of(keyword)), VARCHAR, new RawJsonDecoder.Descriptor("a"))).isEmpty();
+        assertThat(OpenSearchMetadata.keywordSubField(new IndexMetadata.Field(false, true, "a", new IndexMetadata.PrimitiveType("text"), List.of(keyword)), new ArrayType(VARCHAR), new VarcharDecoder.Descriptor("a"))).isEmpty();
+    }
+
+    @Test
+    public void testColumnHandleJsonRoundTrip()
+    {
+        JsonMapper mapper = new JsonMapperProvider().get()
+                .rebuild()
+                .addModule(new SimpleModule().addDeserializer(Type.class, new TypeDeserializer(TESTING_TYPE_MANAGER)))
+                .build();
+        JsonCodec<OpenSearchColumnHandle> codec = new JsonCodecFactory(mapper).jsonCodec(OpenSearchColumnHandle.class);
+
+        OpenSearchColumnHandle withSubField = textColumnWithKeyword("tenantId", OptionalInt.of(256));
+        assertThat(codec.fromJson(codec.toJson(withSubField))).isEqualTo(withSubField);
+        OpenSearchColumnHandle withoutLimit = textColumnWithKeyword("tenantId", OptionalInt.empty());
+        assertThat(codec.fromJson(codec.toJson(withoutLimit))).isEqualTo(withoutLimit);
+        OpenSearchColumnHandle keyword = keywordColumn("name");
+        assertThat(codec.fromJson(codec.toJson(keyword))).isEqualTo(keyword);
+
+        // a handle serialized without the sub-field
+        String json = codec.toJson(keyword).replaceAll(",\\s*\"keywordSubField\"\\s*:\\s*null", "");
+        assertThat(json).doesNotContain("keywordSubField");
+        assertThat(codec.fromJson(json)).isEqualTo(keyword);
+    }
+
+    private void assertFullyPushed(OpenSearchColumnHandle column, Domain domain)
+    {
+        ConstraintApplicationResult<ConnectorTableHandle> result = metadata.applyFilter(SESSION, scanHandle(), new Constraint(TupleDomain.withColumnDomains(Map.of(column, domain))))
+                .orElseThrow();
+        assertThat(((OpenSearchTableHandle) result.getHandle()).constraint()).isEqualTo(TupleDomain.withColumnDomains(Map.of(column, domain)));
+        assertThat(result.getRemainingFilter()).isEqualTo(TupleDomain.all());
+    }
+
+    private void assertNotPushed(OpenSearchColumnHandle column, Domain domain)
+    {
+        // nothing changes, so the filter stays in Trino
+        assertThat(metadata.applyFilter(SESSION, scanHandle(), new Constraint(TupleDomain.withColumnDomains(Map.of(column, domain))))).isEmpty();
+    }
+
+    private static Optional<IndexMetadata.SubField> keywordSubField(IndexMetadata.Field field)
+    {
+        return OpenSearchMetadata.keywordSubField(field, VARCHAR, new VarcharDecoder.Descriptor(field.name()));
+    }
+
+    private static IndexMetadata.Field textField(IndexMetadata.SubField... subFields)
+    {
+        return new IndexMetadata.Field(false, false, "tenantId", new IndexMetadata.PrimitiveType("text"), List.of(subFields));
+    }
+
+    private static IndexMetadata.SubField subField(String name, String type, OptionalInt ignoreAbove, Optional<String> normalizer)
+    {
+        return new IndexMetadata.SubField(name, type, ignoreAbove, normalizer, true, false);
+    }
+
+    static OpenSearchColumnHandle textColumnWithKeyword(String name, OptionalInt ignoreAbove)
+    {
+        return new OpenSearchColumnHandle(
+                List.of(name),
+                VARCHAR,
+                new IndexMetadata.PrimitiveType("text"),
+                new VarcharDecoder.Descriptor(name),
+                false,
+                Optional.of(subField("keyword", "keyword", ignoreAbove, Optional.empty())));
     }
 
     private Optional<TopNApplicationResult<ConnectorTableHandle>> applyTopN(OpenSearchColumnHandle column)

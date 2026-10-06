@@ -15,6 +15,7 @@ package io.trino.plugin.opensearch;
 
 import com.google.common.collect.ImmutableList;
 import io.airlift.slice.Slice;
+import io.trino.plugin.opensearch.client.IndexMetadata;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.Range;
 import io.trino.spi.predicate.TupleDomain;
@@ -27,6 +28,7 @@ import org.opensearch.index.query.QueryStringQueryBuilder;
 import org.opensearch.index.query.RangeQueryBuilder;
 import org.opensearch.index.query.RegexpQueryBuilder;
 import org.opensearch.index.query.TermQueryBuilder;
+import org.opensearch.index.query.TermsQueryBuilder;
 import org.opensearch.search.aggregations.AggregationBuilder;
 import org.opensearch.search.aggregations.AggregationBuilders;
 import org.opensearch.search.aggregations.bucket.composite.CompositeAggregationBuilder;
@@ -125,7 +127,13 @@ public final class OpenSearchQueryBuilder
                 Domain domain = entry.getValue();
 
                 checkArgument(!domain.isNone(), "Unexpected NONE domain for %s", column.name());
-                if (!domain.isAll()) {
+                if (domain.isAll()) {
+                    continue;
+                }
+                if (column.keywordSubField().isPresent()) {
+                    queryBuilder.filter(keywordSubFieldQuery(column, column.keywordSubField().get(), domain));
+                }
+                else {
                     addPredicateToQueryBuilder(queryBuilder, column.name(), domain, column.type());
                 }
             }
@@ -140,6 +148,23 @@ public final class OpenSearchQueryBuilder
             return queryBuilder;
         }
         return new MatchAllQueryBuilder();
+    }
+
+    /**
+     * Matches the discrete values of a {@code text} column on its {@code keyword} sub-field. The metadata only pushes
+     * domains for which this is exact, see {@link OpenSearchMetadata#isKeywordSubFieldPushdownExact}.
+     */
+    private static QueryBuilder keywordSubFieldQuery(OpenSearchColumnHandle column, IndexMetadata.SubField subField, Domain domain)
+    {
+        checkArgument(OpenSearchMetadata.isKeywordSubFieldPushdownExact(domain, subField), "Domain cannot be pushed to the keyword sub-field of %s: %s", column.name(), domain);
+        String field = column.name() + "." + subField.name();
+        List<String> values = domain.getValues().getRanges().getOrderedRanges().stream()
+                .map(range -> ((Slice) range.getSingleValue()).toStringUtf8())
+                .collect(toImmutableList());
+        if (values.size() == 1) {
+            return new TermQueryBuilder(field, getOnlyElement(values));
+        }
+        return new TermsQueryBuilder(field, values);
     }
 
     private static void addPredicateToQueryBuilder(BoolQueryBuilder queryBuilder, String columnName, Domain domain, Type type)
