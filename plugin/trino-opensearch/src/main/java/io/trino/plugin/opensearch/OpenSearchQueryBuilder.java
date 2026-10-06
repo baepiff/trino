@@ -87,8 +87,9 @@ public final class OpenSearchQueryBuilder
         ImmutableList.Builder<CompositeValuesSourceBuilder<?>> sources = ImmutableList.builder();
         for (TermAggregation termAggregation : termAggregations) {
             // missingBucket keeps rows whose grouping column is NULL as their own group
+            // the source is named after the column, also when it reads a sub-field, so that bucket and after keys use the column name
             sources.add(new TermsValuesSourceBuilder(termAggregation.term())
-                    .field(termAggregation.term())
+                    .field(termAggregation.field())
                     .missingBucket(true));
         }
         CompositeAggregationBuilder composite = new CompositeAggregationBuilder(COMPOSITE_AGGREGATION_NAME, sources.build())
@@ -96,6 +97,33 @@ public final class OpenSearchQueryBuilder
         after.ifPresent(composite::aggregateAfter);
         metrics.forEach(composite::subAggregation);
         return ImmutableList.of(composite);
+    }
+
+    /**
+     * Matches the documents of the filter that have a value for a {@code text} grouping column but no term in the
+     * {@code keyword} sub-field grouped on instead, because the value is longer than the {@code ignore_above} of the
+     * sub-field, or because the document was indexed before the sub-field was added. The composite aggregation would
+     * count these documents in the NULL group. Empty when no grouping column reads a sub-field.
+     */
+    public static Optional<QueryBuilder> buildUncoveredDocumentsQuery(QueryBuilder filter, List<TermAggregation> termAggregations)
+    {
+        List<QueryBuilder> uncovered = termAggregations.stream()
+                .filter(termAggregation -> termAggregation.subField().isPresent())
+                .<QueryBuilder>map(termAggregation -> new BoolQueryBuilder()
+                        .filter(new ExistsQueryBuilder(termAggregation.term()))
+                        .mustNot(new ExistsQueryBuilder(termAggregation.field())))
+                .collect(toImmutableList());
+        if (uncovered.isEmpty()) {
+            return Optional.empty();
+        }
+
+        BoolQueryBuilder query = new BoolQueryBuilder().filter(filter);
+        if (uncovered.size() == 1) {
+            return Optional.of(query.filter(getOnlyElement(uncovered)));
+        }
+        BoolQueryBuilder anyUncovered = new BoolQueryBuilder().minimumShouldMatch(1);
+        uncovered.forEach(anyUncovered::should);
+        return Optional.of(query.filter(anyUncovered));
     }
 
     private static Optional<AggregationBuilder> buildMetricAggregation(MetricAggregation aggregation)

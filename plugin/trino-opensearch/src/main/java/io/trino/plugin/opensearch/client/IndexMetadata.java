@@ -35,8 +35,12 @@ public record IndexMetadata(ObjectType schema)
     /**
      * @param subFields the multi-fields declared under {@code fields} in the mapping; only retained for
      *         top-level fields, and only when every index behind the table declares them identically
+     * @param presenceIndexed whether an {@code exists} query on the {@code text} field matches every document with a
+     *         value for it, including an empty string, in every index behind the table: the field is indexed, and
+     *         either keeps its norms or the index keeps the {@code _field_names} meta field; only determined for
+     *         top-level fields, and only meaningful for {@code text} fields
      */
-    public record Field(boolean asRawJson, boolean isArray, String name, Type type, List<SubField> subFields)
+    public record Field(boolean asRawJson, boolean isArray, String name, Type type, List<SubField> subFields, boolean presenceIndexed)
     {
         @JsonCreator
         public Field
@@ -49,6 +53,11 @@ public record IndexMetadata(ObjectType schema)
             requireNonNull(type, "type is null");
             // absent in handles serialized before sub-fields were retained
             subFields = subFields == null ? ImmutableList.of() : ImmutableList.copyOf(subFields);
+        }
+
+        public Field(boolean asRawJson, boolean isArray, String name, Type type, List<SubField> subFields)
+        {
+            this(asRawJson, isArray, name, type, subFields, true);
         }
 
         public Field(boolean asRawJson, boolean isArray, String name, Type type)

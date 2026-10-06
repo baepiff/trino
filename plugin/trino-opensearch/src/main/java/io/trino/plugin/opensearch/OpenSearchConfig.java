@@ -62,6 +62,7 @@ public class OpenSearchConfig
     private boolean projectionPushDownEnabled = true;
     private boolean aggregationPushdownEnabled = true;
     private boolean textEqualityPushdownEnabled;
+    private boolean textGroupByPushdownEnabled;
     private int maxAggregationBuckets = 65_535;
 
     private Security security;
@@ -367,6 +368,21 @@ public class OpenSearchConfig
     public OpenSearchConfig setTextEqualityPushdownEnabled(boolean textEqualityPushdownEnabled)
     {
         this.textEqualityPushdownEnabled = textEqualityPushdownEnabled;
+        return this;
+    }
+
+    public boolean isTextGroupByPushdownEnabled()
+    {
+        return textGroupByPushdownEnabled;
+    }
+
+    @Config("opensearch.text-groupby-pushdown-enabled")
+    @ConfigDescription("Push down GROUP BY on text fields to their keyword sub-field. " +
+            "Assumes that the sub-field covers every value; one extra request per query verifies it and fails the query when a value " +
+            "is longer than ignore_above or was indexed before the sub-field was added")
+    public OpenSearchConfig setTextGroupByPushdownEnabled(boolean textGroupByPushdownEnabled)
+    {
+        this.textGroupByPushdownEnabled = textGroupByPushdownEnabled;
         return this;
     }
 

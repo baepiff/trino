@@ -29,6 +29,7 @@ public final class OpenSearchSessionProperties
     private static final String PROJECTION_PUSHDOWN_ENABLED = "projection_pushdown_enabled";
     private static final String AGGREGATION_PUSHDOWN_ENABLED = "aggregation_pushdown_enabled";
     private static final String TEXT_EQUALITY_PUSHDOWN_ENABLED = "text_equality_pushdown_enabled";
+    public static final String TEXT_GROUPBY_PUSHDOWN_ENABLED = "text_groupby_pushdown_enabled";
 
     private final List<PropertyMetadata<?>> sessionProperties;
 
@@ -50,6 +51,11 @@ public final class OpenSearchSessionProperties
                         TEXT_EQUALITY_PUSHDOWN_ENABLED,
                         "Push down equality predicates on text fields to their keyword sub-field, assuming all documents were indexed under the current sub-field mapping",
                         openSearchConfig.isTextEqualityPushdownEnabled(),
+                        false))
+                .add(booleanProperty(
+                        TEXT_GROUPBY_PUSHDOWN_ENABLED,
+                        "Push down GROUP BY on text fields to their keyword sub-field. The query fails if a document has a value the sub-field does not cover",
+                        openSearchConfig.isTextGroupByPushdownEnabled(),
                         false))
                 .build();
     }
@@ -73,5 +79,10 @@ public final class OpenSearchSessionProperties
     public static boolean isTextEqualityPushdownEnabled(ConnectorSession session)
     {
         return session.getProperty(TEXT_EQUALITY_PUSHDOWN_ENABLED, Boolean.class);
+    }
+
+    public static boolean isTextGroupByPushdownEnabled(ConnectorSession session)
+    {
+        return session.getProperty(TEXT_GROUPBY_PUSHDOWN_ENABLED, Boolean.class);
     }
 }
