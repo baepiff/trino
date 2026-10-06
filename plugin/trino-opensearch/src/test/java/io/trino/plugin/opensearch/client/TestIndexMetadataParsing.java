@@ -151,6 +151,54 @@ public class TestIndexMetadataParsing
     }
 
     @Test
+    public void testPresenceIndexed()
+            throws IOException
+    {
+        List<Field> fields = parse(
+                """
+                {"index": {"mappings": {"properties": {
+                    "default": {"type": "text", "fields": {"keyword": {"type": "keyword"}}},
+                    "not_indexed": {"type": "text", "index": false, "fields": {"keyword": {"type": "keyword"}}},
+                    "without_norms": {"type": "text", "norms": false, "fields": {"keyword": {"type": "keyword"}}}
+                }}}}
+                """);
+        // without norms, an exists query reads the _field_names meta field
+        assertThat(fields).extracting(Field::name, Field::presenceIndexed).containsExactly(
+                tuple("default", true),
+                tuple("not_indexed", false),
+                tuple("without_norms", true));
+
+        List<Field> withoutFieldNames = parse(
+                """
+                {"index": {"mappings": {"_field_names": {"enabled": false}, "properties": {
+                    "default": {"type": "text", "fields": {"keyword": {"type": "keyword"}}},
+                    "without_norms": {"type": "text", "norms": false, "fields": {"keyword": {"type": "keyword"}}}
+                }}}}
+                """);
+        assertThat(withoutFieldNames).extracting(Field::name, Field::presenceIndexed).containsExactly(
+                tuple("default", true),
+                tuple("without_norms", false));
+
+        // every index behind the table must record it
+        List<Field> acrossIndexes = parse(
+                """
+                {
+                    "index_1": {"mappings": {"properties": {
+                        "same": {"type": "text", "fields": {"keyword": {"type": "keyword"}}},
+                        "not_indexed_elsewhere": {"type": "text", "fields": {"keyword": {"type": "keyword"}}}
+                    }}},
+                    "index_2": {"mappings": {"_field_names": {"enabled": false}, "properties": {
+                        "same": {"type": "text", "fields": {"keyword": {"type": "keyword"}}},
+                        "not_indexed_elsewhere": {"type": "text", "norms": false, "fields": {"keyword": {"type": "keyword"}}}
+                    }}}
+                }
+                """);
+        assertThat(acrossIndexes).extracting(Field::name, Field::presenceIndexed).containsExactly(
+                tuple("same", true),
+                tuple("not_indexed_elsewhere", false));
+    }
+
+    @Test
     public void testEmptyMappings()
             throws IOException
     {
