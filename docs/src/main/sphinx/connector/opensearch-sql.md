@@ -111,7 +111,8 @@ The connector pushes a global aggregation, which is an aggregation without
   values with a very large magnitude are not written, and the aggregation
   is then not pushed down to the SQL plugin.
   Equality predicates on `text` fields, which the OpenSearch connector pushes
-  down through a `keyword` sub-field, are not written either. A global
+  down through a `keyword` sub-field when `opensearch.text-equality-pushdown.enabled`
+  is set, are not written either. A global
   aggregation with such a predicate is pushed down as an OpenSearch search
   aggregation instead, unless it uses a statistical function.
 

@@ -90,6 +90,11 @@ The following table details all general configuration properties:
   - Push down supported aggregations to OpenSearch. The catalog session property
     `aggregation_pushdown_enabled` overrides this value for a session.
   - `true`
+* - `opensearch.text-equality-pushdown.enabled`
+  - Push down equality predicates on `text` fields with a `keyword` sub-field,
+    see [](opensearch-text-equality-pushdown). The catalog session property
+    `text_equality_pushdown_enabled` overrides this value for a session.
+  - `false`
 * - `opensearch.max-aggregation-buckets`
   - Maximum number of buckets requested in each aggregation search request. The
     connector pages through larger results. Must not exceed the cluster
@@ -515,6 +520,7 @@ following data types:
 No other data types are supported for predicate push down, with one exception
 for `text` fields described in the next section.
 
+(opensearch-text-equality-pushdown)=
 #### Equality on `text` fields with a `keyword` sub-field
 
 Dynamic mapping, and many explicit mappings, index a string as a `text` field
@@ -526,6 +532,19 @@ with a `keyword` sub-field, for example:
   "fields": { "keyword": { "type": "keyword", "ignore_above": 256 } }
 }
 ```
+
+This push down is disabled by default. Set `opensearch.text-equality-pushdown.enabled`
+to `true` in the catalog, or the catalog session property
+`text_equality_pushdown_enabled` to `true` for a session, to enable it.
+
+The push down assumes that every document was indexed under the current mapping
+of the sub-field. The connector cannot detect from the mapping whether this is
+the case. If the `keyword` sub-field was added to an existing `text` field after
+documents were indexed, or `ignore_above` was raised later, the older documents
+have no terms in the sub-field, and a pushed down predicate silently omits them
+from the results. Run `_update_by_query` on the index, or reindex it, before
+you enable the push down for such an index. Indices that were created with
+dynamic mapping from the start are not affected.
 
 A predicate on such a column that uses `=` or `IN` is pushed down as a `term`
 or `terms` query on the `keyword` sub-field, for example on `tenantId.keyword`.
@@ -550,6 +569,14 @@ when all of the following hold:
 Range predicates such as `<`, `>`, `<>` and `BETWEEN`, `LIKE`, and `IS NULL`
 and `IS NOT NULL` on `text` fields are not pushed down, and are evaluated by
 Trino. Grouping, sorting and aggregations on `text` fields are not pushed down.
+
+Two behaviors follow from the predicate being evaluated by OpenSearch on the
+indexed terms instead of by Trino on the values read from `_source`. A document
+whose `_source` value is an array, a boolean, or a number in a non-canonical
+form such as `1.50` can match, or be counted by, a pushed down predicate, while
+without the push down reading that document fails or returns a different value.
+Fields excluded from `_source` are read as `NULL`, but still match a pushed
+down predicate.
 
 (opensearch-aggregation-pushdown)=
 ### Aggregation push down
