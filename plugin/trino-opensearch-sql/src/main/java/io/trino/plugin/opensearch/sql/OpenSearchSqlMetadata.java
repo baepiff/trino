@@ -43,6 +43,7 @@ import static io.trino.plugin.opensearch.MetricAggregation.canonicalFunctionName
 import static io.trino.plugin.opensearch.OpenSearchSessionProperties.isAggregationPushdownEnabled;
 import static io.trino.plugin.opensearch.OpenSearchTableHandle.Type.SCAN;
 import static io.trino.plugin.opensearch.sql.OpenSearchSqlSessionProperties.globalAggregationEngine;
+import static io.trino.plugin.opensearch.sql.OpenSearchSqlSessionProperties.isStatisticalPushdownEnabled;
 
 public class OpenSearchSqlMetadata
         extends OpenSearchMetadata
@@ -88,6 +89,10 @@ public class OpenSearchSqlMetadata
 
         boolean hasStatisticalFunction = aggregates.stream()
                 .anyMatch(aggregate -> STATISTICAL_FUNCTIONS.contains(canonicalFunctionName(aggregate.getFunctionName())));
+        if (hasStatisticalFunction && !isStatisticalPushdownEnabled(session)) {
+            // the SQL plugin computes these from the sum of squares and loses precision, so Trino computes them unless enabled
+            return Optional.empty();
+        }
         if (globalAggregationEngine(session) == GlobalAggregationEngine.DSL && !hasStatisticalFunction) {
             return Optional.empty();
         }

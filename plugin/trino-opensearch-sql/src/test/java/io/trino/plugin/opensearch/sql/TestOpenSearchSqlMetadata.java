@@ -108,6 +108,11 @@ public class TestOpenSearchSqlMetadata
 
     private static ConnectorSession session(GlobalAggregationEngine engine, boolean aggregationPushdownEnabled)
     {
+        return session(engine, aggregationPushdownEnabled, true);
+    }
+
+    private static ConnectorSession session(GlobalAggregationEngine engine, boolean aggregationPushdownEnabled, boolean statisticalPushdownEnabled)
+    {
         List<PropertyMetadata<?>> properties = ImmutableList.<PropertyMetadata<?>>builder()
                 .addAll(new OpenSearchSessionProperties(new OpenSearchConfig()).getSessionProperties())
                 .addAll(new OpenSearchSqlSessionProperties(new OpenSearchSqlConfig()).getSessionProperties())
@@ -116,7 +121,8 @@ public class TestOpenSearchSqlMetadata
                 .setPropertyMetadata(properties)
                 .setPropertyValues(ImmutableMap.of(
                         "aggregation_pushdown_enabled", aggregationPushdownEnabled,
-                        "global_aggregation_engine", engine.name()))
+                        "global_aggregation_engine", engine.name(),
+                        "statistical_pushdown_enabled", statisticalPushdownEnabled))
                 .build();
     }
 
@@ -182,6 +188,50 @@ public class TestOpenSearchSqlMetadata
         OpenSearchTableHandle handle = (OpenSearchTableHandle) result.getHandle();
         assertThat(handle.type()).isEqualTo(SQL_AGGREGATION);
         assertThat(handle.metricAggregations()).extracting(MetricAggregation::functionName).containsExactly("stddev_samp", "var_samp", "var_pop");
+    }
+
+    @Test
+    public void testStatisticalFunctionsAreNotPushedByDefault()
+    {
+        // the default session property value comes from the default config
+        ConnectorSession defaults = TestingConnectorSession.builder()
+                .setPropertyMetadata(ImmutableList.<PropertyMetadata<?>>builder()
+                        .addAll(new OpenSearchSessionProperties(new OpenSearchConfig()).getSessionProperties())
+                        .addAll(new OpenSearchSqlSessionProperties(new OpenSearchSqlConfig()).getSessionProperties())
+                        .build())
+                .build();
+        assertThat(apply(defaults, scanHandle(), List.of(function("stddev", DOUBLE, "duration", DOUBLE)), List.of(List.of()))).isEmpty();
+
+        ConnectorSession off = session(GlobalAggregationEngine.SQL, true, false);
+        for (String name : List.of("stddev", "stddev_samp", "stddev_pop", "variance", "var_samp", "var_pop")) {
+            assertThat(apply(off, scanHandle(), List.of(function(name, DOUBLE, "duration", DOUBLE)), List.of(List.of()))).as(name).isEmpty();
+        }
+        // one statistical function keeps the whole aggregation in Trino
+        assertThat(apply(off, scanHandle(), List.of(countStar(), function("stddev", DOUBLE, "duration", DOUBLE)), List.of(List.of()))).isEmpty();
+        // the DSL engine does not bring them back
+        assertThat(apply(session(GlobalAggregationEngine.DSL, true, false), scanHandle(), List.of(function("stddev", DOUBLE, "duration", DOUBLE)), List.of(List.of()))).isEmpty();
+        // other aggregates are still pushed
+        assertThat(applyGlobal(off, scanHandle(), List.of(countStar(), function("sum", DOUBLE, "duration", DOUBLE)))).isEqualTo(SQL_AGGREGATION);
+    }
+
+    @Test
+    public void testStatisticalPushdownSessionPropertyOverridesConfig()
+    {
+        List<PropertyMetadata<?>> properties = ImmutableList.<PropertyMetadata<?>>builder()
+                .addAll(new OpenSearchSessionProperties(new OpenSearchConfig()).getSessionProperties())
+                .addAll(new OpenSearchSqlSessionProperties(new OpenSearchSqlConfig().setStatisticalPushdownEnabled(true)).getSessionProperties())
+                .build();
+        ConnectorSession configEnabled = TestingConnectorSession.builder().setPropertyMetadata(properties).build();
+        assertThat(applyGlobal(configEnabled, scanHandle(), List.of(function("stddev", DOUBLE, "duration", DOUBLE)))).isEqualTo(SQL_AGGREGATION);
+
+        ConnectorSession sessionDisabled = TestingConnectorSession.builder()
+                .setPropertyMetadata(properties)
+                .setPropertyValues(ImmutableMap.of("statistical_pushdown_enabled", false))
+                .build();
+        assertThat(apply(sessionDisabled, scanHandle(), List.of(function("stddev", DOUBLE, "duration", DOUBLE)), List.of(List.of()))).isEmpty();
+
+        ConnectorSession sessionEnabled = session(GlobalAggregationEngine.SQL, true, true);
+        assertThat(applyGlobal(sessionEnabled, scanHandle(), List.of(countStar(), function("var_pop", DOUBLE, "duration", DOUBLE)))).isEqualTo(SQL_AGGREGATION);
     }
 
     @Test

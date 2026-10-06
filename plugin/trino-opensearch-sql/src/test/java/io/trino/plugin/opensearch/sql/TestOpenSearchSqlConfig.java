@@ -29,16 +29,20 @@ public class TestOpenSearchSqlConfig
     public void testDefaults()
     {
         assertRecordedDefaults(recordDefaults(OpenSearchSqlConfig.class)
-                .setGlobalAggregationEngine(GlobalAggregationEngine.SQL));
+                .setGlobalAggregationEngine(GlobalAggregationEngine.SQL)
+                .setStatisticalPushdownEnabled(false));
     }
 
     @Test
     public void testExplicitPropertyMappings()
     {
-        Map<String, String> properties = ImmutableMap.of("opensearch.sql.global-aggregation-engine", "DSL");
+        Map<String, String> properties = ImmutableMap.of(
+                "opensearch.sql.global-aggregation-engine", "DSL",
+                "opensearch.sql.statistical-pushdown-enabled", "true");
 
         OpenSearchSqlConfig expected = new OpenSearchSqlConfig()
-                .setGlobalAggregationEngine(GlobalAggregationEngine.DSL);
+                .setGlobalAggregationEngine(GlobalAggregationEngine.DSL)
+                .setStatisticalPushdownEnabled(true);
 
         assertFullMapping(properties, expected);
     }

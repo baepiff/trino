@@ -136,8 +136,9 @@ public class TestOpenSearchSqlConnector
         try {
             // population and sample statistics of d = [1.0, 2.0, 4.0]
             String sql = "SELECT stddev(d), stddev_pop(d), variance(d), var_pop(d) FROM " + table;
-            assertPushedDownBySql(sql);
-            MaterializedRow row = getOnlyElement(computeActual(sql).getMaterializedRows());
+            Session statistical = statisticalPushdownSession();
+            assertPushedDownBySql(statistical, sql);
+            MaterializedRow row = getOnlyElement(computeActual(statistical, sql).getMaterializedRows());
             assertThat((Double) row.getField(0)).isCloseTo(1.5275252316519468, within(1e-9));
             assertThat((Double) row.getField(1)).isCloseTo(1.247219128924647, within(1e-9));
             assertThat((Double) row.getField(2)).isCloseTo(2.3333333333333335, within(1e-9));
@@ -182,16 +183,20 @@ public class TestOpenSearchSqlConnector
             double[] expected = {Math.sqrt(variancePopulation), variancePopulation, Math.sqrt(varianceSample), varianceSample};
 
             String sql = "SELECT stddev_pop(d), var_pop(d), stddev(d), variance(d) FROM " + table;
-            assertPushedDownBySql(sql);
-            MaterializedRow pushed = getOnlyElement(computeActual(sql).getMaterializedRows());
+            Session statistical = statisticalPushdownSession();
+            assertPushedDownBySql(statistical, sql);
+            MaterializedRow pushed = getOnlyElement(computeActual(statistical, sql).getMaterializedRows());
 
             // Characterization of a precision problem of the OpenSearch 2.19 SQL plugin: it derives the variance from
             // the sum of squares, so the cancellation at 1e9 values with a spread of about 1 loses all digits. Observed:
-            // 0.0 for all four functions instead of 1.414.., 2.0, 1.421.. and 2.020... This test is expected to change
-            // when the plugin computes the statistics in a numerically stable way.
+            // 0.0 for all four functions instead of 1.414.., 2.0, 1.421.. and 2.020... This is the reason why the
+            // statistical functions are pushed down only when statistical_pushdown_enabled is set. This test is expected
+            // to change when the plugin computes the statistics in a numerically stable way.
             for (int column = 0; column < expected.length; column++) {
                 double relativeError = Math.abs((Double) pushed.getField(column) - expected[column]) / expected[column];
-                assertThat(relativeError).as("column %s", column).isGreaterThan(1e-6);
+                assertThat(relativeError)
+                        .as("column %s: precision problem appears fixed upstream; update opensearch-sql.md and this test", column)
+                        .isGreaterThan(1e-6);
             }
 
             // Trino computes the same statistics accurately when the aggregation is not pushed down
@@ -199,9 +204,40 @@ public class TestOpenSearchSqlConnector
                     .setCatalogSessionProperty(CATALOG, "aggregation_pushdown_enabled", "false")
                     .build();
             MaterializedRow accurate = getOnlyElement(computeActual(unpushed, sql).getMaterializedRows());
+            // the default session does not push the statistical functions and returns the same accurate values
+            assertThat(getOnlyElement(computeActual(sql).getMaterializedRows())).isEqualTo(accurate);
             for (int column = 0; column < expected.length; column++) {
                 assertThat((Double) accurate.getField(column)).as("column %s", column).isCloseTo(expected[column], within(expected[column] * 1e-6));
             }
+        }
+        finally {
+            deleteIndex(table);
+        }
+    }
+
+    @Test
+    public void testStatisticalFunctionsAreNotPushedDownByDefault()
+            throws IOException
+    {
+        String table = createStandardIndex();
+        try {
+            String sql = "SELECT stddev(d), stddev_pop(d), variance(d), var_pop(d) FROM " + table;
+            assertThat(explain(getSession(), sql)).contains("Aggregate").doesNotContain("SQL_AGGREGATION");
+            assertThat(query(sql)).isNotFullyPushedDown(AggregationNode.class);
+
+            MaterializedRow row = getOnlyElement(computeActual(sql).getMaterializedRows());
+            assertThat((Double) row.getField(0)).isCloseTo(1.5275252316519468, within(1e-9));
+            assertThat((Double) row.getField(1)).isCloseTo(1.247219128924647, within(1e-9));
+            assertThat((Double) row.getField(2)).isCloseTo(2.3333333333333335, within(1e-9));
+            assertThat((Double) row.getField(3)).isCloseTo(1.5555555555555556, within(1e-9));
+
+            // one statistical function keeps the whole aggregation in Trino
+            String mixedSql = "SELECT count(*), stddev(d) FROM " + table;
+            assertThat(explain(getSession(), mixedSql)).contains("Aggregate").doesNotContain("SQL_AGGREGATION");
+            assertThat(query(mixedSql)).isNotFullyPushedDown(AggregationNode.class);
+
+            // aggregates without statistical functions are still pushed down
+            assertPushedDownBySql("SELECT count(*), sum(d) FROM " + table);
         }
         finally {
             deleteIndex(table);
@@ -215,19 +251,20 @@ public class TestOpenSearchSqlConnector
         String table = createStandardIndex();
         try {
             // empty input: count 0, everything else NULL (the plugin returns 0 for sum)
+            Session statistical = statisticalPushdownSession();
             String emptySql = "SELECT count(*), count(i), sum(d), avg(d), min(i), max(i), stddev(d), var_pop(d) FROM " + table + " WHERE g = 'no_such_value'";
-            assertThat(query(emptySql))
+            assertThat(query(statistical, emptySql))
                     .matches("VALUES (BIGINT '0', BIGINT '0', CAST(NULL AS DOUBLE), CAST(NULL AS DOUBLE), CAST(NULL AS INTEGER), CAST(NULL AS INTEGER), CAST(NULL AS DOUBLE), CAST(NULL AS DOUBLE))")
                     .isFullyPushedDown();
-            assertPushedDownBySql(emptySql);
-            assertPushedDownBySql("SELECT sum(d), stddev(d) FROM " + table + " WHERE g = 'no_such_value'");
+            assertPushedDownBySql(statistical, emptySql);
+            assertPushedDownBySql(statistical, "SELECT sum(d), stddev(d) FROM " + table + " WHERE g = 'no_such_value'");
 
             // one row: population statistics are 0.0, sample statistics NULL
             String singleRowSql = "SELECT stddev_pop(d), var_pop(d), stddev(d), variance(d) FROM " + table + " WHERE g = 'b'";
-            assertThat(query(singleRowSql))
+            assertThat(query(statistical, singleRowSql))
                     .matches("VALUES (DOUBLE '0.0', DOUBLE '0.0', CAST(NULL AS DOUBLE), CAST(NULL AS DOUBLE))")
                     .isFullyPushedDown();
-            assertPushedDownBySql(singleRowSql);
+            assertPushedDownBySql(statistical, singleRowSql);
         }
         finally {
             deleteIndex(table);
@@ -373,14 +410,22 @@ public class TestOpenSearchSqlConnector
         try {
             Session dsl = Session.builder(getSession())
                     .setCatalogSessionProperty(CATALOG, "global_aggregation_engine", "DSL")
+                    .setCatalogSessionProperty(CATALOG, "statistical_pushdown_enabled", "true")
                     .build();
             // base set stays pushed as search aggregations (AGGREGATION), statistical functions still go through SQL
+            // when their push down is enabled
             String baseSql = "SELECT count(*), sum(d) FROM " + table;
             assertThat(query(dsl, baseSql)).matches("VALUES (BIGINT '3', DOUBLE '7.0')").isFullyPushedDown();
             assertPushedDownByDsl(dsl, baseSql);
             String statisticalSql = "SELECT stddev(d) FROM " + table;
             assertThat(query(dsl, statisticalSql)).isFullyPushedDown();
             assertPushedDownBySql(dsl, statisticalSql);
+
+            // without the statistical push down they stay in Trino with the DSL engine as well
+            Session dslWithoutStatistical = Session.builder(getSession())
+                    .setCatalogSessionProperty(CATALOG, "global_aggregation_engine", "DSL")
+                    .build();
+            assertThat(explain(dslWithoutStatistical, statisticalSql)).contains("Aggregate").doesNotContain("AGGREGATION:");
 
             // the default engine answers the base set through SQL
             assertPushedDownBySql(baseSql);
@@ -419,6 +464,13 @@ public class TestOpenSearchSqlConnector
     {
         String plan = explain(session, sql);
         assertThat(plan).doesNotContain("Aggregate").contains("TableScan").contains("AGGREGATION:").doesNotContain("SQL_AGGREGATION");
+    }
+
+    private Session statisticalPushdownSession()
+    {
+        return Session.builder(getSession())
+                .setCatalogSessionProperty(CATALOG, "statistical_pushdown_enabled", "true")
+                .build();
     }
 
     private String explain(Session session, String sql)

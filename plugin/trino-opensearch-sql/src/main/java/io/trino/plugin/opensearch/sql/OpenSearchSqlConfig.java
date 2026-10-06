@@ -26,6 +26,7 @@ public class OpenSearchSqlConfig
     }
 
     private GlobalAggregationEngine globalAggregationEngine = GlobalAggregationEngine.SQL;
+    private boolean statisticalPushdownEnabled;
 
     @NotNull
     public GlobalAggregationEngine getGlobalAggregationEngine()
@@ -34,10 +35,23 @@ public class OpenSearchSqlConfig
     }
 
     @Config("opensearch.sql.global-aggregation-engine")
-    @ConfigDescription("Engine for global aggregations: SQL pushes them through the OpenSearch SQL plugin; DSL uses search aggregations and uses SQL only for statistical functions")
+    @ConfigDescription("Engine for global aggregations: SQL pushes them through the OpenSearch SQL plugin; DSL uses search aggregations and uses SQL only for statistical functions when statistical pushdown is enabled")
     public OpenSearchSqlConfig setGlobalAggregationEngine(GlobalAggregationEngine globalAggregationEngine)
     {
         this.globalAggregationEngine = globalAggregationEngine;
+        return this;
+    }
+
+    public boolean isStatisticalPushdownEnabled()
+    {
+        return statisticalPushdownEnabled;
+    }
+
+    @Config("opensearch.sql.statistical-pushdown-enabled")
+    @ConfigDescription("Push down stddev, stddev_samp, stddev_pop, variance, var_samp and var_pop to the OpenSearch SQL plugin. The plugin computes them from the sum of squares and loses precision when the values are large compared to their spread, so they are computed by Trino unless this is enabled")
+    public OpenSearchSqlConfig setStatisticalPushdownEnabled(boolean statisticalPushdownEnabled)
+    {
+        this.statisticalPushdownEnabled = statisticalPushdownEnabled;
         return this;
     }
 }

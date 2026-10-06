@@ -22,12 +22,14 @@ import io.trino.spi.session.PropertyMetadata;
 
 import java.util.List;
 
+import static io.trino.spi.session.PropertyMetadata.booleanProperty;
 import static io.trino.spi.session.PropertyMetadata.enumProperty;
 
 public final class OpenSearchSqlSessionProperties
         implements SessionPropertiesProvider
 {
     public static final String GLOBAL_AGGREGATION_ENGINE = "global_aggregation_engine";
+    public static final String STATISTICAL_PUSHDOWN_ENABLED = "statistical_pushdown_enabled";
 
     private final List<PropertyMetadata<?>> sessionProperties;
 
@@ -41,6 +43,11 @@ public final class OpenSearchSqlSessionProperties
                         GlobalAggregationEngine.class,
                         config.getGlobalAggregationEngine(),
                         false))
+                .add(booleanProperty(
+                        STATISTICAL_PUSHDOWN_ENABLED,
+                        "Push down stddev, variance and related functions to the OpenSearch SQL plugin, which can lose precision for large values with a small spread",
+                        config.isStatisticalPushdownEnabled(),
+                        false))
                 .build();
     }
 
@@ -53,5 +60,10 @@ public final class OpenSearchSqlSessionProperties
     public static GlobalAggregationEngine globalAggregationEngine(ConnectorSession session)
     {
         return session.getProperty(GLOBAL_AGGREGATION_ENGINE, GlobalAggregationEngine.class);
+    }
+
+    public static boolean isStatisticalPushdownEnabled(ConnectorSession session)
+    {
+        return session.getProperty(STATISTICAL_PUSHDOWN_ENABLED, Boolean.class);
     }
 }

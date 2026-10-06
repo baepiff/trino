@@ -20,7 +20,8 @@ OpenSearch connector.
   `plugins.sql.enabled` must not be set to `false`. On a cluster without the
   plugin, use the [](/connector/opensearch) instead, or set the catalog session
   property `aggregation_pushdown_enabled` to `false`. With
-  `opensearch.sql.global-aggregation-engine=DSL` the statistical functions
+  `opensearch.sql.global-aggregation-engine=DSL` and
+  `opensearch.sql.statistical-pushdown-enabled=true` the statistical functions
   still need the SQL plugin.
 - When the OpenSearch security plugin is enabled, the user that Trino
   authenticates as needs the permission to use the SQL plugin in addition to
@@ -60,10 +61,19 @@ connector adds the following property:
     plugin. With `DSL`, the aggregations that the OpenSearch connector supports
     are pushed down as search aggregations, and only the statistical functions
     `stddev`, `stddev_samp`, `stddev_pop`, `variance`, `var_samp` and `var_pop`
-    use the SQL plugin. The
+    use the SQL plugin, if their push down is enabled with
+    `opensearch.sql.statistical-pushdown-enabled`. The
     catalog session property `global_aggregation_engine` overrides this value
     for a session.
   - `SQL`
+* - `opensearch.sql.statistical-pushdown-enabled`
+  - Push down the statistical functions `stddev`, `stddev_samp`, `stddev_pop`,
+    `variance`, `var_samp` and `var_pop` to the SQL plugin. The plugin loses
+    precision for some data, so Trino computes these functions unless you
+    enable this property. See
+    [](opensearch-sql-statistical-precision). The catalog session property
+    `statistical_pushdown_enabled` overrides this value for a session.
+  - `false`
 :::
 
 Aggregation push down as a whole can still be disabled with
@@ -113,8 +123,10 @@ of the OpenSearch connector, or to the processing in Trino.
     prevents the push down. These aggregates stay in Trino.
 * - `stddev(column)`, `stddev_samp(column)`, `stddev_pop(column)`,
     `variance(column)`, `var_samp(column)`, `var_pop(column)`
-  - `DOUBLE`. Arguments that Trino casts first, such as `INTEGER` columns, are
-    not pushed down.
+  - `DOUBLE`, only when `opensearch.sql.statistical-pushdown-enabled` or the
+    session property `statistical_pushdown_enabled` is `true`. Arguments that
+    Trino casts first, such as `INTEGER` columns, are not pushed down. By
+    default these functions are computed by Trino.
 :::
 
 The following operations stay in Trino:
@@ -127,6 +139,9 @@ The following operations stay in Trino:
   `DOUBLE` values that are represented exactly.
 - Aggregates with `DISTINCT`, such as `count(DISTINCT column)`.
 - Aggregates over expressions rather than plain columns.
+- The statistical functions, unless their push down is enabled. If an
+  aggregation contains one statistical function, the whole aggregation stays in
+  Trino.
 
 The connector reads the aggregate values from the SQL plugin response and
 adjusts the following results so that they match the results of Trino:
@@ -139,6 +154,9 @@ adjusts the following results so that they match the results of Trino:
 - `stddev`, `stddev_samp`, `variance`, `var_samp` and the other sample
   statistics over fewer than two rows return `NULL`.
 
+These adjustments for the statistical functions apply only when their push down
+is enabled.
+
 (opensearch-sql-legacy-engine)=
 ### Legacy engine detection
 
@@ -149,7 +167,8 @@ statement includes a `count(*)` check column, which is shared with a `count(*)`
 in your query, and the connector checks its result type. If the response does not have the expected type, the query fails with an
 error that names the property `opensearch.sql.global-aggregation-engine=DSL`.
 To avoid the SQL path for such a cluster, set the property to `DSL`. With that
-setting only the statistical functions require the SQL plugin.
+setting only the statistical functions require the SQL plugin, and only when
+their push down is enabled.
 
 (opensearch-sql-cold-start)=
 ### Retry on cold start
@@ -171,21 +190,30 @@ equal to or greater than 2,147,483,647 (`Integer.MAX_VALUE`). The error message
 names the property `opensearch.sql.global-aggregation-engine=DSL`, which
 answers counts with search aggregations. A count with the type `long` is
 accepted at any size. A `NULL` or non-numeric value in a count column also fails
-the query.
+the query. A count that wraps around past 2^32, which needs more than 4 billion
+matching documents, cannot be detected.
 
-### Precision of statistical functions
+(opensearch-sql-statistical-precision)=
+### Statistical functions
 
-The SQL plugin of OpenSearch 2.19 appears to compute `stddev`, `stddev_samp`,
-`stddev_pop`, `variance`, `var_samp` and `var_pop` from the sum of squares,
-which loses precision when the values are large compared to their spread. In a
-test with 100 `double` values of the form `1e9 + (n mod 5)`, the plugin returned
-`0.0` for `stddev_pop`, `var_pop`, `stddev` and `variance`, where the exact
-results are `1.414...`, `2.0`, `1.421...` and `2.020...`. Trino returned values
-that agree with the exact ones to better than 1e-8 when it computed the
-statistics itself. If your data has such a shape, set the catalog session
-property `aggregation_pushdown_enabled` to `false`, or the catalog property
-`opensearch.aggregation-pushdown-enabled` to `false`, so that Trino computes the
-statistics.
+The connector does not push down `stddev`, `stddev_samp`, `stddev_pop`,
+`variance`, `var_samp` and `var_pop` by default, and Trino computes them. The
+SQL plugin of OpenSearch 2.19 appears to compute these functions from the sum of
+squares, which loses precision when the values are large compared to their
+spread. In a test on OpenSearch 2.19.4 with 100 `double` values of the form
+`1e9 + (n mod 5)`, the plugin returned `0.0` for `stddev_pop`, `var_pop`,
+`stddev` and `variance`, where the exact results are `1.41421...`, `2.0`,
+`1.42134...` and `2.0202...`. Trino with push down disabled returned values that
+agree with the exact ones to better than 1e-8. Pushing the functions down by
+default would silently return such wrong results.
+
+If your data has small spreads relative to the values, keep the default. If the
+precision is sufficient for your data and you want the SQL plugin to compute the
+statistics, set the catalog property
+`opensearch.sql.statistical-pushdown-enabled=true`, or the catalog session
+property `statistical_pushdown_enabled` to `true` for a session. An aggregation
+that contains a statistical function stays completely in Trino when the push
+down is not enabled, including the other aggregates of the same query.
 
 ## Limitations
 
