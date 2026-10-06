@@ -368,18 +368,19 @@ public abstract class BaseOpenSearchConnectorTest
                 {
                     "properties": {
                         "g": { "type": "keyword" },
-                        "v": { "type": "integer" }
+                        "v": { "type": "integer" },
+                        "w": { "type": "double" }
                     }
                 }
                 """;
 
         createIndex(tableName, properties);
         try {
-            index(tableName, ImmutableMap.of("g", "a", "v", 10));
-            index(tableName, ImmutableMap.of("g", "a", "v", 20));
-            index(tableName, ImmutableMap.of("g", "b", "v", 5));
-            index(tableName, ImmutableMap.of("v", 7));
-            index(tableName, ImmutableMap.of("v", 8));
+            index(tableName, ImmutableMap.of("g", "a", "v", 10, "w", 10.5));
+            index(tableName, ImmutableMap.of("g", "a", "v", 20, "w", 20.5));
+            index(tableName, ImmutableMap.of("g", "b", "v", 5, "w", 5.5));
+            index(tableName, ImmutableMap.of("v", 7, "w", 7.5));
+            index(tableName, ImmutableMap.of("v", 8, "w", 8.5));
             index(tableName, ImmutableMap.of("g", "c"));
 
             @Language("SQL")
@@ -415,6 +416,25 @@ public abstract class BaseOpenSearchConnectorTest
                     .isNotFullyPushedDown(AggregationNode.class, ProjectNode.class);
             assertThat(query(format("SELECT g, count(*) FROM %s WHERE g = 'no_such_group' GROUP BY g", tableName)))
                     .returnsEmptyResult();
+
+            // sum and avg of a DOUBLE column are pushed down. A group whose values are all missing returns NULL for them
+            assertThat(query(format("SELECT count(*), count(w), sum(w), avg(w), min(w), max(w) FROM %s WHERE g = 'c'", tableName)))
+                    .matches("VALUES (BIGINT '1', BIGINT '0', CAST(NULL AS DOUBLE), CAST(NULL AS DOUBLE), CAST(NULL AS DOUBLE), CAST(NULL AS DOUBLE))")
+                    .isFullyPushedDown();
+
+            // empty input: count is 0, sum, avg, min and max are NULL
+            assertThat(query(format("SELECT count(*), count(w), sum(w), avg(w), min(w), max(w) FROM %s WHERE g = 'no_such_group'", tableName)))
+                    .matches("VALUES (BIGINT '0', BIGINT '0', CAST(NULL AS DOUBLE), CAST(NULL AS DOUBLE), CAST(NULL AS DOUBLE), CAST(NULL AS DOUBLE))")
+                    .isFullyPushedDown();
+
+            // grouped, including the group without a key and the group whose values are all missing
+            assertThat(query(format("SELECT g, count(*), count(w), sum(w), avg(w), min(w), max(w) FROM %s GROUP BY g", tableName)))
+                    .matches("VALUES " +
+                            "(CAST(NULL AS VARCHAR), BIGINT '2', BIGINT '2', DOUBLE '16.0', DOUBLE '8.0', DOUBLE '7.5', DOUBLE '8.5'), " +
+                            "(CAST('a' AS VARCHAR), BIGINT '2', BIGINT '2', DOUBLE '31.0', DOUBLE '15.5', DOUBLE '10.5', DOUBLE '20.5'), " +
+                            "(CAST('b' AS VARCHAR), BIGINT '1', BIGINT '1', DOUBLE '5.5', DOUBLE '5.5', DOUBLE '5.5', DOUBLE '5.5'), " +
+                            "(CAST('c' AS VARCHAR), BIGINT '1', BIGINT '0', CAST(NULL AS DOUBLE), CAST(NULL AS DOUBLE), CAST(NULL AS DOUBLE), CAST(NULL AS DOUBLE))")
+                    .isFullyPushedDown();
 
             // a single bucket per request forces pagination (pages: NULL, a, b, c), so the NULL group key is sent back in the after_key
             try (QueryAssertions assertions = new QueryAssertions(createAdHocQueryRunner(Map.of("opensearch.max-aggregation-buckets", "1")))) {
