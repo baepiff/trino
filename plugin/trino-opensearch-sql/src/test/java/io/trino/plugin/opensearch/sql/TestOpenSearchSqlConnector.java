@@ -17,6 +17,7 @@ import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.google.common.collect.ImmutableMap;
 import io.trino.Session;
 import io.trino.sql.planner.plan.AggregationNode;
+import io.trino.sql.planner.plan.FilterNode;
 import io.trino.sql.planner.plan.ProjectNode;
 import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.MaterializedRow;
@@ -364,6 +365,48 @@ public class TestOpenSearchSqlConnector
             assertThat(computeActual("SELECT g, count(*) FROM " + table + " GROUP BY g").getRowCount()).isEqualTo(2500);
             assertThat(query("SELECT count(*) FROM (SELECT g FROM " + table + " GROUP BY g)"))
                     .matches("VALUES BIGINT '2500'");
+        }
+        finally {
+            deleteIndex(table);
+        }
+    }
+
+    @Test
+    public void testTextFieldEqualityFilterIsPushedWithTheAggregationThroughDsl()
+            throws IOException
+    {
+        String table = "test_sql_text_filter_" + randomNameSuffix();
+        createIndex(table,
+                """
+                {
+                    "properties": {
+                        "tenant": {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 20}}},
+                        "i": {"type": "integer"},
+                        "d": {"type": "double"}
+                    }
+                }
+                """);
+        try {
+            index(table, ImmutableMap.of("tenant", "tenant-a", "i", 1, "d", 1.0));
+            index(table, ImmutableMap.of("tenant", "tenant-a", "i", 3, "d", 2.0));
+            index(table, ImmutableMap.of("tenant", "Tenant-A", "i", 5, "d", 4.0));
+            index(table, ImmutableMap.of("tenant", "tenant-a and more words", "i", 7, "d", 8.0));
+            index(table, ImmutableMap.of("i", 9, "d", 16.0));
+
+            // predicates on text columns are never written as SQL, so the filter and the aggregation are pushed through the DSL
+            String sql = "SELECT count(*), max(i), sum(d) FROM " + table + " WHERE tenant = 'tenant-a'";
+            assertThat(query(sql))
+                    .matches("VALUES (BIGINT '2', 3, DOUBLE '3.0')")
+                    .isFullyPushedDown();
+            assertPushedDownByDsl(getSession(), sql);
+            assertThat(query("SELECT count(*), max(i) FROM " + table + " WHERE tenant IN ('Tenant-A', 'tenant-b')"))
+                    .matches("VALUES (BIGINT '1', 5)")
+                    .isFullyPushedDown();
+
+            // a literal longer than ignore_above stays in Trino, and so does the aggregation
+            assertThat(query("SELECT count(*) FROM " + table + " WHERE tenant = 'tenant-a and more words'"))
+                    .matches("VALUES BIGINT '1'")
+                    .isNotFullyPushedDown(FilterNode.class);
         }
         finally {
             deleteIndex(table);

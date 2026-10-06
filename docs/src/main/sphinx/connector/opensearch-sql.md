@@ -110,6 +110,10 @@ The connector pushes a global aggregation, which is an aggregation without
   characters, `TIMESTAMP` values with a precision above milliseconds and `DOUBLE`
   values with a very large magnitude are not written, and the aggregation
   is then not pushed down to the SQL plugin.
+  Equality predicates on `text` fields, which the OpenSearch connector pushes
+  down through a `keyword` sub-field, are not written either. A global
+  aggregation with such a predicate is pushed down as an OpenSearch search
+  aggregation instead, unless it uses a statistical function.
 
 If any of these conditions is not met, the connector falls back to the push down
 of the OpenSearch connector, or to the processing in Trino.

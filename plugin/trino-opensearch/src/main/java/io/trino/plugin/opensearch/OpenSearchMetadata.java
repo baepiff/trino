@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.opensearch;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
@@ -72,6 +73,7 @@ import io.trino.spi.expression.FieldDereference;
 import io.trino.spi.expression.Variable;
 import io.trino.spi.function.table.ConnectorTableFunctionHandle;
 import io.trino.spi.predicate.Domain;
+import io.trino.spi.predicate.Range;
 import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.BigintType;
@@ -91,6 +93,7 @@ import io.trino.spi.type.VarcharType;
 import org.opensearch.client.ResponseException;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
@@ -164,6 +167,11 @@ public class OpenSearchMetadata
     private static final Set<Integer> REGEXP_RESERVED_CHARACTERS = IntStream.of('.', '?', '+', '*', '|', '{', '}', '[', ']', '(', ')', '"', '#', '@', '&', '<', '>', '~')
             .boxed()
             .collect(toImmutableSet());
+
+    // Lucene's limit on the UTF-8 length of an indexed term (IndexWriter.MAX_TERM_LENGTH)
+    private static final int MAX_TERM_BYTES = 32766;
+    // far below the default index.max_terms_count of a terms query, so pushing a list never fails the query
+    private static final int MAX_PUSHED_TERMS = 1024;
 
     private final Type ipAddressType;
     private final OpenSearchClient client;
@@ -275,7 +283,8 @@ public class OpenSearchMetadata
                     converted.type(),
                     field.type(),
                     converted.decoderDescriptor(),
-                    supportsPredicates(field.type(), converted.type)));
+                    supportsPredicates(field.type(), converted.type),
+                    keywordSubField(field, converted.type(), converted.decoderDescriptor())));
         }
 
         return result.buildOrThrow();
@@ -661,6 +670,9 @@ public class OpenSearchMetadata
             if (column.supportsPredicates()) {
                 supported.put(column, entry.getValue());
             }
+            else if (column.keywordSubField().isPresent() && isKeywordSubFieldPushdownExact(entry.getValue(), column.keywordSubField().get())) {
+                supported.put(column, entry.getValue());
+            }
             else {
                 unsupported.put(column, entry.getValue());
             }
@@ -953,6 +965,68 @@ public class OpenSearchMetadata
             case VarcharType _ when type instanceof PrimitiveType primitiveType && primitiveType.name().toLowerCase(ENGLISH).equals("keyword") -> true;
             default -> false;
         };
+    }
+
+    /**
+     * Finds a sub-field of a {@code text} column that indexes every column value as one exact term, so that a {@code term}
+     * query on the sub-field matches the same documents as Trino's equality on the column, as long as the literal can be
+     * indexed at all (see {@link #isKeywordSubFieldPushdownExact}). The column must be a top-level {@code text} field read
+     * as a plain VARCHAR, and the sub-field must be an indexed {@code keyword} without a {@code normalizer} (which would
+     * change the indexed terms, for example to lower case) and without a {@code null_value} (which would index a term
+     * for documents without a value). When several sub-fields qualify, the one indexing the longest values is used.
+     */
+    @VisibleForTesting
+    static Optional<IndexMetadata.SubField> keywordSubField(IndexMetadata.Field field, Type trinoType, DecoderDescriptor decoderDescriptor)
+    {
+        if (field.asRawJson()
+                || field.isArray()
+                || !(field.type() instanceof PrimitiveType primitiveType)
+                || !primitiveType.name().equals("text")
+                || !trinoType.equals(VARCHAR)
+                || !(decoderDescriptor instanceof VarcharDecoder.Descriptor)) {
+            return Optional.empty();
+        }
+        return field.subFields().stream()
+                .filter(subField -> subField.type().equals("keyword"))
+                .filter(subField -> subField.normalizer().isEmpty())
+                .filter(IndexMetadata.SubField::indexed)
+                .filter(subField -> !subField.hasNullValue())
+                .filter(subField -> subField.ignoreAbove().orElse(Integer.MAX_VALUE) > 0)
+                // the first of the mapping order on ties
+                .max(Comparator.comparingInt(subField -> subField.ignoreAbove().orElse(Integer.MAX_VALUE)));
+    }
+
+    /**
+     * Whether a {@code term} or {@code terms} query on the keyword sub-field returns exactly the rows of the domain.
+     * <p>
+     * A {@code keyword} sub-field does not index a value longer than its {@code ignore_above} characters, and Lucene
+     * cannot index a term longer than {@value #MAX_TERM_BYTES} bytes. A literal within those limits can only equal a
+     * value that was indexed, so the query is exact; a longer literal can only equal a value that was not indexed, so the
+     * query would miss those rows. Only discrete values are supported: a range over the sub-field would miss the values
+     * that were not indexed, and an {@code exists} query cannot tell documents without a value apart when the value was
+     * not indexed, so domains allowing NULL are not supported either.
+     */
+    @VisibleForTesting
+    static boolean isKeywordSubFieldPushdownExact(Domain domain, IndexMetadata.SubField subField)
+    {
+        if (!domain.getType().equals(VARCHAR) || domain.isNullAllowed() || domain.getValues().isNone() || domain.getValues().isAll()) {
+            return false;
+        }
+        List<Range> ranges = domain.getValues().getRanges().getOrderedRanges();
+        if (ranges.size() > MAX_PUSHED_TERMS) {
+            return false;
+        }
+        for (Range range : ranges) {
+            if (!range.isSingleValue()) {
+                return false;
+            }
+            Slice value = (Slice) range.getSingleValue();
+            String text = value.toStringUtf8();
+            if (value.length() > MAX_TERM_BYTES || (subField.ignoreAbove().isPresent() && text.length() > subField.ignoreAbove().orElseThrow())) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private record InternalTableMetadata(SchemaTableName tableName, List<ColumnMetadata> columnMetadata, Map<String, ColumnHandle> columnHandles) {}

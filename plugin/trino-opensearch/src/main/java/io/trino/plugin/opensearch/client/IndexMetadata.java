@@ -13,11 +13,14 @@
  */
 package io.trino.plugin.opensearch.client;
 
+import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonSubTypes;
 import com.fasterxml.jackson.annotation.JsonTypeInfo;
 import com.google.common.collect.ImmutableList;
 
 import java.util.List;
+import java.util.Optional;
+import java.util.OptionalInt;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static java.util.Objects.requireNonNull;
@@ -29,8 +32,13 @@ public record IndexMetadata(ObjectType schema)
         requireNonNull(schema, "schema is null");
     }
 
-    public record Field(boolean asRawJson, boolean isArray, String name, Type type)
+    /**
+     * @param subFields the multi-fields declared under {@code fields} in the mapping; only retained for
+     *         top-level fields, and only when every index behind the table declares them identically
+     */
+    public record Field(boolean asRawJson, boolean isArray, String name, Type type, List<SubField> subFields)
     {
+        @JsonCreator
         public Field
         {
             checkArgument(
@@ -39,6 +47,29 @@ public record IndexMetadata(ObjectType schema)
                     name);
             requireNonNull(name, "name is null");
             requireNonNull(type, "type is null");
+            // absent in handles serialized before sub-fields were retained
+            subFields = subFields == null ? ImmutableList.of() : ImmutableList.copyOf(subFields);
+        }
+
+        public Field(boolean asRawJson, boolean isArray, String name, Type type)
+        {
+            this(asRawJson, isArray, name, type, ImmutableList.of());
+        }
+    }
+
+    /**
+     * A multi-field of a mapped field, for example the {@code keyword} sub-field that dynamic mapping adds to
+     * every {@code text} field. Only the mapping parameters that affect which terms are indexed are kept.
+     */
+    public record SubField(String name, String type, OptionalInt ignoreAbove, Optional<String> normalizer, boolean indexed, boolean hasNullValue)
+    {
+        @JsonCreator
+        public SubField
+        {
+            requireNonNull(name, "name is null");
+            requireNonNull(type, "type is null");
+            requireNonNull(ignoreAbove, "ignoreAbove is null");
+            requireNonNull(normalizer, "normalizer is null");
         }
     }
 
