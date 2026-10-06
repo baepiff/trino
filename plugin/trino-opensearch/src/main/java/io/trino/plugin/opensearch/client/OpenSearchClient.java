@@ -84,6 +84,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.ScheduledExecutorService;
@@ -94,6 +95,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
 import static io.airlift.json.JsonCodec.jsonCodec;
@@ -469,34 +471,7 @@ public class OpenSearchClient
 
         return doRequest(path, body -> {
             try {
-                JsonNode mappings = JSON_MAPPER.readTree(body)
-                        .elements().next()
-                        .get("mappings");
-
-                if (!mappings.elements().hasNext()) {
-                    return new IndexMetadata(new IndexMetadata.ObjectType(ImmutableList.of()));
-                }
-                if (!mappings.has("properties")) {
-                    // Older versions of OpenSearch supported multiple "type" mappings
-                    // for a given index. Newer versions support only one and don't
-                    // expose it in the document. Here we skip it if it's present.
-                    mappings = mappings.elements().next();
-
-                    if (!mappings.has("properties")) {
-                        return new IndexMetadata(new IndexMetadata.ObjectType(ImmutableList.of()));
-                    }
-                }
-
-                JsonNode metaNode = nullSafeNode(mappings, "_meta");
-
-                JsonNode metaProperties = nullSafeNode(metaNode, "trino");
-
-                // stay backwards compatible with _meta.presto namespace for meta properties for some releases
-                if (metaProperties.isNull()) {
-                    metaProperties = nullSafeNode(metaNode, "presto");
-                }
-
-                return new IndexMetadata(parseType(mappings.get("properties"), metaProperties));
+                return parseIndexMetadata(JSON_MAPPER.readTree(body));
             }
             catch (IOException e) {
                 throw new TrinoException(OPENSEARCH_INVALID_RESPONSE, e);
@@ -504,7 +479,55 @@ public class OpenSearchClient
         });
     }
 
-    private IndexMetadata.ObjectType parseType(JsonNode properties, JsonNode metaProperties)
+    @VisibleForTesting
+    static IndexMetadata parseIndexMetadata(JsonNode response)
+    {
+        // an alias or a wildcard expression returns the mappings of every index behind it
+        List<Optional<JsonNode>> typeMappings = ImmutableList.copyOf(response.elements()).stream()
+                .map(element -> typeMapping(element.get("mappings")))
+                .collect(toImmutableList());
+
+        if (typeMappings.getFirst().isEmpty()) {
+            return new IndexMetadata(new IndexMetadata.ObjectType(ImmutableList.of()));
+        }
+        JsonNode mappings = typeMappings.getFirst().get();
+
+        JsonNode metaNode = nullSafeNode(mappings, "_meta");
+
+        JsonNode metaProperties = nullSafeNode(metaNode, "trino");
+
+        // stay backwards compatible with _meta.presto namespace for meta properties for some releases
+        if (metaProperties.isNull()) {
+            metaProperties = nullSafeNode(metaNode, "presto");
+        }
+
+        IndexMetadata.ObjectType schema = parseType(mappings.get("properties"), metaProperties, true);
+
+        List<JsonNode> allProperties = typeMappings.stream()
+                .map(typeMapping -> typeMapping.map(node -> node.get("properties")).orElse(NullNode.getInstance()))
+                .collect(toImmutableList());
+        return new IndexMetadata(retainConsistentSubFields(schema, allProperties));
+    }
+
+    private static Optional<JsonNode> typeMapping(JsonNode mappings)
+    {
+        if (mappings == null || !mappings.elements().hasNext()) {
+            return Optional.empty();
+        }
+        if (!mappings.has("properties")) {
+            // Older versions of OpenSearch supported multiple "type" mappings
+            // for a given index. Newer versions support only one and don't
+            // expose it in the document. Here we skip it if it's present.
+            mappings = mappings.elements().next();
+
+            if (!mappings.has("properties")) {
+                return Optional.empty();
+            }
+        }
+        return Optional.of(mappings);
+    }
+
+    private static IndexMetadata.ObjectType parseType(JsonNode properties, JsonNode metaProperties, boolean topLevel)
     {
         ImmutableList.Builder<IndexMetadata.Field> result = ImmutableList.builder();
         for (Entry<String, JsonNode> field : properties.properties()) {
@@ -540,20 +563,110 @@ public class OpenSearchClient
                 case "scaled_float" -> result.add(new IndexMetadata.Field(asRawJson, isArray, name, new IndexMetadata.ScaledFloatType(value.get("scaling_factor").asDouble())));
                 case "nested", "object" -> {
                     if (value.has("properties")) {
-                        result.add(new IndexMetadata.Field(asRawJson, isArray, name, parseType(value.get("properties"), metaNode)));
+                        result.add(new IndexMetadata.Field(asRawJson, isArray, name, parseType(value.get("properties"), metaNode, false)));
                     }
                     else {
                         LOG.debug("Ignoring empty object field: %s", name);
                     }
                 }
-                default -> result.add(new IndexMetadata.Field(asRawJson, isArray, name, new IndexMetadata.PrimitiveType(type)));
+                default -> {
+                    // sub-fields are only retained for top-level fields, the only ones that use them
+                    List<IndexMetadata.SubField> subFields = topLevel ? parseSubFields(value) : ImmutableList.of();
+                    result.add(new IndexMetadata.Field(asRawJson, isArray, name, new IndexMetadata.PrimitiveType(type), subFields));
+                }
             }
         }
 
         return new IndexMetadata.ObjectType(result.build());
     }
 
-    private JsonNode nullSafeNode(JsonNode jsonNode, String name)
+    private static List<IndexMetadata.SubField> parseSubFields(JsonNode field)
+    {
+        JsonNode fields = field.get("fields");
+        if (fields == null || !fields.isObject()) {
+            return ImmutableList.of();
+        }
+        ImmutableList.Builder<IndexMetadata.SubField> result = ImmutableList.builder();
+        for (Entry<String, JsonNode> entry : fields.properties()) {
+            JsonNode value = entry.getValue();
+            JsonNode type = value.get("type");
+            JsonNode ignoreAbove = value.get("ignore_above");
+            if (type == null || (ignoreAbove != null && !ignoreAbove.canConvertToInt())) {
+                // the sub-field cannot be reasoned about
+                continue;
+            }
+            OptionalInt ignoreAboveValue = OptionalInt.empty();
+            if (ignoreAbove != null) {
+                ignoreAboveValue = OptionalInt.of(ignoreAbove.asInt());
+            }
+            Optional<String> normalizer = Optional.ofNullable(value.get("normalizer"))
+                    .filter(node -> !node.isNull())
+                    .map(JsonNode::asText);
+            JsonNode indexed = value.get("index");
+            result.add(new IndexMetadata.SubField(
+                    entry.getKey(),
+                    type.asText(),
+                    ignoreAboveValue,
+                    normalizer,
+                    indexed == null || indexed.asBoolean(true),
+                    value.has("null_value")));
+        }
+        return result.build();
+    }
+
+    /**
+     * Keeps a sub-field of a top-level field only when every index behind the table declares the field and the
+     * sub-field identically, and when no field is copied into the field or the sub-field with {@code copy_to}. A copied
+     * value is indexed under the field without being part of its {@code _source}, so a query on the sub-field would
+     * match documents whose Trino value differs.
+     */
+    private static IndexMetadata.ObjectType retainConsistentSubFields(IndexMetadata.ObjectType schema, List<JsonNode> allProperties)
+    {
+        if (schema.fields().stream().allMatch(field -> field.subFields().isEmpty())) {
+            return schema;
+        }
+
+        ImmutableSet.Builder<String> copyToTargetsBuilder = ImmutableSet.builder();
+        allProperties.forEach(properties -> collectCopyToTargets(properties, copyToTargetsBuilder));
+        Set<String> copyToTargets = copyToTargetsBuilder.build();
+
+        ImmutableList.Builder<IndexMetadata.Field> fields = ImmutableList.builder();
+        for (IndexMetadata.Field field : schema.fields()) {
+            List<IndexMetadata.SubField> subFields = field.subFields().stream()
+                    .filter(subField -> !copyToTargets.contains(field.name()) && !copyToTargets.contains(field.name() + "." + subField.name()))
+                    .filter(subField -> allProperties.stream().allMatch(properties -> declaresSubField(properties, field, subField)))
+                    .collect(toImmutableList());
+            fields.add(new IndexMetadata.Field(field.asRawJson(), field.isArray(), field.name(), field.type(), subFields));
+        }
+        return new IndexMetadata.ObjectType(fields.build());
+    }
+
+    private static boolean declaresSubField(JsonNode properties, IndexMetadata.Field field, IndexMetadata.SubField subField)
+    {
+        JsonNode other = properties.get(field.name());
+        return other != null
+                && field.type() instanceof IndexMetadata.PrimitiveType primitiveType
+                && other.has("type")
+                && other.get("type").asText().equals(primitiveType.name())
+                && parseSubFields(other).contains(subField);
+    }
+
+    private static void collectCopyToTargets(JsonNode node, ImmutableSet.Builder<String> targets)
+    {
+        if (node == null || !node.isObject()) {
+            return;
+        }
+        JsonNode copyTo = node.get("copy_to");
+        if (copyTo != null && copyTo.isTextual()) {
+            targets.add(copyTo.asText());
+        }
+        if (copyTo != null && copyTo.isArray()) {
+            copyTo.forEach(target -> targets.add(target.asText()));
+        }
+        node.forEach(child -> collectCopyToTargets(child, targets));
+    }
+
+    private static JsonNode nullSafeNode(JsonNode jsonNode, String name)
     {
         if (jsonNode == null || jsonNode.isNull() || jsonNode.get(name) == null) {
             return NullNode.getInstance();
