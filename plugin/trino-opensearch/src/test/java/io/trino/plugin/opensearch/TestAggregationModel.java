@@ -122,6 +122,16 @@ public class TestAggregationModel
         Map<String, ColumnHandle> assignments = Map.of("regionkey", bigintColumn("regionkey"));
         for (String name : List.of("min", "max", "sum", "avg")) {
             assertThat(MetricAggregation.from(function(name, BIGINT, "regionkey", BIGINT), assignments, "a")).as(name).isEmpty();
+            assertThat(MetricAggregation.from(function(name, BIGINT, "regionkey", BIGINT), assignments, "a", MetricAggregation.DEFAULT_FUNCTIONS, false)).as(name).isEmpty();
+        }
+    }
+
+    @Test
+    public void testBigintIsAcceptedForMinMaxSumAvgWhenAllowed()
+    {
+        Map<String, ColumnHandle> assignments = Map.of("regionkey", bigintColumn("regionkey"));
+        for (String name : List.of("min", "max", "sum", "avg")) {
+            assertThat(MetricAggregation.from(function(name, BIGINT, "regionkey", BIGINT), assignments, "a", MetricAggregation.DEFAULT_FUNCTIONS, true)).as(name).isPresent();
         }
     }
 

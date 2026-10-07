@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.opensearch;
 
+import io.trino.spi.TrinoException;
 import jakarta.annotation.Nullable;
 import org.opensearch.search.aggregations.Aggregation;
 import org.opensearch.search.aggregations.Aggregations;
@@ -29,12 +30,21 @@ import java.util.Optional;
 
 import static com.google.common.base.Verify.verifyNotNull;
 import static io.trino.plugin.opensearch.MetricAggregation.COUNT;
+import static io.trino.plugin.opensearch.MetricAggregation.MAX;
+import static io.trino.plugin.opensearch.MetricAggregation.MIN;
 import static io.trino.plugin.opensearch.MetricAggregation.SUM;
+import static io.trino.plugin.opensearch.OpenSearchErrorCode.OPENSEARCH_QUERY_FAILURE;
 import static io.trino.plugin.opensearch.OpenSearchQueryBuilder.COMPOSITE_AGGREGATION_NAME;
+import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
+import static java.lang.Math.abs;
+import static java.lang.String.format;
 
 final class AggregationResponseReader
 {
+    // doubles represent every integer exactly only up to 2^53
+    private static final double BIGINT_EXACT_LIMIT = 9007199254740992L;
+
     private AggregationResponseReader() {}
 
     record Result(List<Map<String, Object>> rows, Optional<Map<String, Object>> afterKey, int bucketCount) {}
@@ -94,9 +104,27 @@ final class AggregationResponseReader
         verifyNotNull(aggregation, "Missing aggregation result for %s", metric.alias());
         return switch (metric.functionName()) {
             case COUNT -> ((ValueCount) aggregation).getValue();
-            case SUM -> sumValue((Stats) aggregation);
+            case SUM -> checkBigintPrecision(metric, sumValue((Stats) aggregation));
+            case MIN, MAX -> checkBigintPrecision(metric, singleValue((NumericMetricsAggregation.SingleValue) aggregation));
             default -> singleValue((NumericMetricsAggregation.SingleValue) aggregation);
         };
+    }
+
+    @Nullable
+    private static Double checkBigintPrecision(MetricAggregation metric, @Nullable Double value)
+    {
+        // the input column type decides: sum over INTEGER also has a BIGINT output but is exact
+        if (value != null && metric.columnHandle().filter(column -> column.type().equals(BIGINT)).isPresent() && abs(value) >= BIGINT_EXACT_LIMIT) {
+            throw new TrinoException(
+                    OPENSEARCH_QUERY_FAILURE,
+                    format(
+                            "Result of %s(%s) is %s, which is not guaranteed to be exact because OpenSearch computes it as a double (limit is 2^53). " +
+                                    "Disable opensearch.bigint-aggregation-pushdown-enabled (session property bigint_aggregation_pushdown_enabled) to compute this aggregation in Trino",
+                            metric.functionName(),
+                            metric.columnHandle().map(OpenSearchColumnHandle::name).orElse("*"),
+                            value));
+        }
+        return value;
     }
 
     @Nullable
