@@ -351,6 +351,86 @@ public class TestAggregationResponseReader
     }
 
     @Test
+    public void testBigintSumFailsWhenInputsCancelOutAfterRounding()
+            throws IOException
+    {
+        // 2^53+1 and -2^53 become the doubles 2^53 and -2^53, so the sum is 0 instead of 1
+        Aggregations aggregations = parse(bigintStats(2, -9007199254740992.0, 9007199254740992.0, 0.0));
+        assertThatThrownBy(() -> AggregationResponseReader.read(aggregations, 2, ImmutableList.of(), ImmutableList.of(BIGINT_SUM)))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> assertThat(exception.getErrorCode()).isEqualTo(OPENSEARCH_QUERY_FAILURE.toErrorCode()))
+                .hasMessageContaining("bigint-aggregation-pushdown-enabled")
+                .hasMessageContaining("sum(big)")
+                .hasMessageContaining("9007199254740992")
+                .hasMessageNotContaining("E15");
+    }
+
+    @Test
+    public void testBigintSumFailsWhenSingleInputIsNotExactlyRepresentable()
+            throws IOException
+    {
+        Aggregations aggregations = parse(bigintStats(3, 0.0, 9007199254740992.0, 10.0));
+        assertThatThrownBy(() -> AggregationResponseReader.read(aggregations, 3, ImmutableList.of(), ImmutableList.of(BIGINT_SUM)))
+                .isInstanceOf(TrinoException.class)
+                .hasMessageContaining("bigint-aggregation-pushdown-enabled");
+    }
+
+    @Test
+    public void testBigintSumFailsWhenMixedSignPartialSumsMayBeInexact()
+            throws IOException
+    {
+        // count * max(|min|, |max|) = 10 * 1e15 exceeds 2^53 although every value and the final sum are exact
+        Aggregations aggregations = parse(bigintStats(10, -1.0e15, 1.0e15, 0.0));
+        assertThatThrownBy(() -> AggregationResponseReader.read(aggregations, 10, ImmutableList.of(), ImmutableList.of(BIGINT_SUM)))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> assertThat(exception.getErrorCode()).isEqualTo(OPENSEARCH_QUERY_FAILURE.toErrorCode()))
+                .hasMessageContaining("bigint-aggregation-pushdown-enabled")
+                .hasMessageContaining("partial sums");
+    }
+
+    @Test
+    public void testBigintSumOverSmallMixedSignDataIsReturned()
+            throws IOException
+    {
+        Result result = AggregationResponseReader.read(
+                parse(bigintStats(100, -1.0e10, 1.0e10, 5.0e9)), 100, ImmutableList.of(), ImmutableList.of(BIGINT_SUM));
+        assertThat(result.rows()).singleElement().satisfies(row -> assertThat(row).containsEntry("big_sum", 5.0e9));
+    }
+
+    @Test
+    public void testBigintSumOverNonNegativeDataIsCheckedByFinalValueOnly()
+            throws IOException
+    {
+        // count * max is 4e15 * 1000 beyond 2^53, but all values are non-negative so every partial sum is bounded by the final sum
+        Result result = AggregationResponseReader.read(
+                parse(bigintStats(4_000_000, 0.0, 1.0e9, 4.0e15)), 4_000_000, ImmutableList.of(), ImmutableList.of(BIGINT_SUM));
+        assertThat(result.rows()).singleElement().satisfies(row -> assertThat(row).containsEntry("big_sum", 4.0e15));
+    }
+
+    @Test
+    public void testGroupedBigintSumFailsWholeQueryOnMixedSignBucket()
+            throws IOException
+    {
+        Aggregations aggregations = parse(
+                """
+                {
+                  "composite#groupBy": {
+                    "after_key": {"kind": "b"},
+                    "buckets": [
+                      {"key": {"kind": "a"}, "doc_count": 1, "stats#big_sum": {"count": 1, "min": 1.0, "max": 1.0, "avg": 1.0, "sum": 1.0}},
+                      {"key": {"kind": "b"}, "doc_count": 10, "stats#big_sum": {"count": 10, "min": -1.0E15, "max": 1.0E15, "avg": 0.0, "sum": 0.0}}
+                    ]
+                  }
+                }
+                """);
+        assertThatThrownBy(() -> AggregationResponseReader.read(
+                aggregations,
+                11,
+                ImmutableList.of(new TermAggregation("kind", VARCHAR)),
+                ImmutableList.of(BIGINT_SUM)))
+                .isInstanceOf(TrinoException.class)
+                .hasMessageContaining("partial sums");
+    }
+
+    @Test
     public void testStatisticalValues()
             throws IOException
     {
@@ -454,6 +534,11 @@ public class TestAggregationResponseReader
                                 "std_deviation_bounds": {"upper": null, "lower": null, "upper_population": null, "lower_population": null, "upper_sampling": null, "lower_sampling": null}}
                               """.formatted(alias, count, variancePopulation, variancePopulation, varianceSampling, stdPopulation, stdPopulation, stdSampling))
                 .collect(Collectors.joining(","));
+    }
+
+    private static String bigintStats(long count, double min, double max, double sum)
+    {
+        return "{\"stats#big_sum\": {\"count\": %s, \"min\": %s, \"max\": %s, \"avg\": 0.0, \"sum\": %s}}".formatted(count, min, max, sum);
     }
 
     private static String bigintSum(double sum)

@@ -109,7 +109,7 @@ final class AggregationResponseReader
         verifyNotNull(aggregation, "Missing aggregation result for %s", metric.alias());
         return switch (metric.functionName()) {
             case COUNT -> ((ValueCount) aggregation).getValue();
-            case SUM -> checkBigintPrecision(metric, sumValue((Stats) aggregation));
+            case SUM -> sumValue(metric, (Stats) aggregation);
             case MIN, MAX -> checkBigintPrecision(metric, singleValue((NumericMetricsAggregation.SingleValue) aggregation));
             case STDDEV_SAMP, STDDEV_POP, VAR_SAMP, VAR_POP -> statisticalValue(metric.functionName(), (ExtendedStats) aggregation);
             default -> singleValue((NumericMetricsAggregation.SingleValue) aggregation);
@@ -119,28 +119,70 @@ final class AggregationResponseReader
     @Nullable
     private static Double checkBigintPrecision(MetricAggregation metric, @Nullable Double value)
     {
-        // the input column type decides: sum over INTEGER also has a BIGINT output but is exact
-        if (value != null && metric.columnHandle().filter(column -> column.type().equals(BIGINT)).isPresent() && abs(value) >= BIGINT_EXACT_LIMIT) {
-            throw new TrinoException(
-                    OPENSEARCH_QUERY_FAILURE,
-                    format(
-                            "Result of %s(%s) is %s, which is not guaranteed to be exact because OpenSearch computes it as a double (limit is 2^53). " +
-                                    "Disable opensearch.bigint-aggregation-pushdown-enabled (session property bigint_aggregation_pushdown_enabled) to compute this aggregation in Trino",
-                            metric.functionName(),
-                            metric.columnHandle().map(OpenSearchColumnHandle::name).orElse("*"),
-                            value));
+        if (value != null && isBigintInput(metric) && abs(value) >= BIGINT_EXACT_LIMIT) {
+            throw inexactBigint(metric, "the final value %s is not guaranteed to be exact".formatted(plain(value)));
         }
         return value;
     }
 
     @Nullable
-    private static Double sumValue(Stats stats)
+    private static Double sumValue(MetricAggregation metric, Stats stats)
     {
         // the sum of an empty input is NULL in SQL, but OpenSearch reports 0
         if (stats.getCount() == 0) {
             return null;
         }
+        // Note: a sum over an INTEGER input is also computed as a double and is not guaranteed to be exact
+        // (more than about 4.2 million documents near the INTEGER maximum push it past 2^53). This path is not guarded.
+        if (isBigintInput(metric)) {
+            checkBigintSum(metric, stats);
+        }
         return stats.getSum();
+    }
+
+    private static void checkBigintSum(MetricAggregation metric, Stats stats)
+    {
+        double min = stats.getMin();
+        double max = stats.getMax();
+        double largest = Math.max(abs(min), abs(max));
+        if (largest >= BIGINT_EXACT_LIMIT) {
+            throw inexactBigint(metric, "an input value of magnitude %s is not exactly representable as a double".formatted(plain(largest)));
+        }
+        // With mixed signs a partial sum (including a per-shard reduction) can reach count * largest; computed in double, which cannot overflow here
+        if (min < 0 && max > 0 && stats.getCount() * largest >= BIGINT_EXACT_LIMIT) {
+            throw inexactBigint(metric, "partial sums over %s values with magnitude up to %s may be inexact".formatted(stats.getCount(), plain(largest)));
+        }
+        double sum = stats.getSum();
+        if (abs(sum) >= BIGINT_EXACT_LIMIT) {
+            throw inexactBigint(metric, "the final value %s is not guaranteed to be exact".formatted(plain(sum)));
+        }
+    }
+
+    private static boolean isBigintInput(MetricAggregation metric)
+    {
+        // the input column type decides: sum over INTEGER also has a BIGINT output
+        return metric.columnHandle().filter(column -> column.type().equals(BIGINT)).isPresent();
+    }
+
+    private static TrinoException inexactBigint(MetricAggregation metric, String reason)
+    {
+        return new TrinoException(
+                OPENSEARCH_QUERY_FAILURE,
+                format(
+                        "Result of %s(%s) may be inexact: %s, because OpenSearch computes it as a double (limit is 2^53). " +
+                                "Disable opensearch.bigint-aggregation-pushdown-enabled (session property bigint_aggregation_pushdown_enabled) to compute this aggregation in Trino",
+                        metric.functionName(),
+                        metric.columnHandle().map(OpenSearchColumnHandle::name).orElse("*"),
+                        reason));
+    }
+
+    private static String plain(double value)
+    {
+        // print integral values as plain integers rather than in scientific notation
+        if (value == Math.rint(value) && abs(value) < 9.2e18) {
+            return String.valueOf((long) value);
+        }
+        return String.valueOf(value);
     }
 
     @Nullable
