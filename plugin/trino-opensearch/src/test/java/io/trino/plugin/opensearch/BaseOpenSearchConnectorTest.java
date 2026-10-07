@@ -330,6 +330,11 @@ public abstract class BaseOpenSearchConnectorTest
                     .matches("VALUES (BIGINT '9007199254740991', BIGINT '4503599627370495', BIGINT '4503599627370496')")
                     .isFullyPushedDown();
 
+            // an empty selection yields NULL for every aggregate, not 0 and not an error
+            assertThat(query(enabled, format("SELECT sum(v), min(v), max(v), avg(v) FROM %s WHERE g = 'none'", tableName)))
+                    .matches("VALUES (CAST(NULL AS BIGINT), CAST(NULL AS BIGINT), CAST(NULL AS BIGINT), CAST(NULL AS DOUBLE))")
+                    .isFullyPushedDown();
+
             // a result at 2^53 or above fails the query, also when it is only one of the groups
             index(tableName, ImmutableMap.of("g", "c", "v", 9007199254740992L));
             assertTrinoExceptionThrownBy(() -> computeActual(enabled, format("SELECT sum(v) FROM %s WHERE g = 'c'", tableName)))

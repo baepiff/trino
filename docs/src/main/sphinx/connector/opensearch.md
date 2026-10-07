@@ -726,12 +726,13 @@ additionally the `text` field is indexed, without `"index": false`, and keeps
 its norms, or the index keeps the `_field_names` meta field. These are the
 defaults; the count relies on them to find the documents that have a value.
 The sub-field must also keep its doc values, the default, which the grouping
-reads; with `doc_values: false` the grouping stays in Trino. A document whose value is the empty string, or only consists of
-characters that the analyzer drops, also counts as having a value. Documents
-without the field or with a `null` value form the `NULL` group, and the empty
-string forms a group of its own, as in Trino. Grouping by `text` and other
-supported columns together is pushed down as well. Sorting by, and aggregate
-functions over, `text` fields are not pushed down.
+reads; with `doc_values: false` the grouping stays in Trino. A document whose
+value is the empty string, or only consists of characters that the analyzer
+drops, also counts as having a value. Documents without the field or with a
+`null` value form the `NULL` group, and the empty string forms a group of its
+own, as in Trino. Grouping by `text` and other supported columns together is
+pushed down as well. Sorting by, and aggregate functions over, `text` fields
+are not pushed down.
 
 (opensearch-statistical-pushdown)=
 #### `stddev` and `variance`
