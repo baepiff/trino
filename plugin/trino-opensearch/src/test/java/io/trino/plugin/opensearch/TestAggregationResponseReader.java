@@ -27,6 +27,7 @@ import org.opensearch.search.aggregations.Aggregation;
 import org.opensearch.search.aggregations.Aggregations;
 import org.opensearch.search.aggregations.bucket.composite.ParsedComposite;
 import org.opensearch.search.aggregations.metrics.ParsedAvg;
+import org.opensearch.search.aggregations.metrics.ParsedExtendedStats;
 import org.opensearch.search.aggregations.metrics.ParsedMax;
 import org.opensearch.search.aggregations.metrics.ParsedMin;
 import org.opensearch.search.aggregations.metrics.ParsedStats;
@@ -34,11 +35,15 @@ import org.opensearch.search.aggregations.metrics.ParsedValueCount;
 
 import java.io.IOException;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import static io.trino.plugin.opensearch.OpenSearchErrorCode.OPENSEARCH_QUERY_FAILURE;
 import static io.trino.plugin.opensearch.TestOpenSearchMetadata.bigintColumn;
+import static io.trino.plugin.opensearch.TestOpenSearchMetadata.doubleColumn;
 import static io.trino.plugin.opensearch.TestOpenSearchMetadata.integerColumn;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
@@ -56,6 +61,7 @@ public class TestAggregationResponseReader
             entry("min", (parser, name) -> ParsedMin.fromXContent(parser, (String) name)),
             entry("avg", (parser, name) -> ParsedAvg.fromXContent(parser, (String) name)),
             entry("stats", (parser, name) -> ParsedStats.fromXContent(parser, (String) name)),
+            entry("extended_stats", (parser, name) -> ParsedExtendedStats.fromXContent(parser, (String) name)),
             entry("value_count", (parser, name) -> ParsedValueCount.fromXContent(parser, (String) name))));
 
     private static final MetricAggregation COUNT_STAR = new MetricAggregation("count", BIGINT, Optional.empty(), "c_star");
@@ -64,6 +70,12 @@ public class TestAggregationResponseReader
     private static final MetricAggregation AVG_VALUE = new MetricAggregation("avg", DOUBLE, Optional.of(integerColumn("v")), "a_value");
     private static final MetricAggregation MIN_VALUE = new MetricAggregation("min", INTEGER, Optional.of(integerColumn("v")), "min_value");
     private static final MetricAggregation MAX_VALUE = new MetricAggregation("max", INTEGER, Optional.of(integerColumn("v")), "max_value");
+
+    private static final List<MetricAggregation> STATISTICAL = ImmutableList.of(
+            new MetricAggregation("stddev_samp", DOUBLE, Optional.of(doubleColumn("d")), "stddev_samp"),
+            new MetricAggregation("stddev_pop", DOUBLE, Optional.of(doubleColumn("d")), "stddev_pop"),
+            new MetricAggregation("var_samp", DOUBLE, Optional.of(doubleColumn("d")), "var_samp"),
+            new MetricAggregation("var_pop", DOUBLE, Optional.of(doubleColumn("d")), "var_pop"));
 
     private static final MetricAggregation BIGINT_SUM = new MetricAggregation("sum", BIGINT, Optional.of(bigintColumn("big")), "big_sum");
     private static final MetricAggregation BIGINT_MIN = new MetricAggregation("min", BIGINT, Optional.of(bigintColumn("big")), "big_min");
@@ -320,6 +332,95 @@ public class TestAggregationResponseReader
                 ImmutableList.of(new TermAggregation("kind", VARCHAR)),
                 ImmutableList.of(BIGINT_SUM)))
                 .isInstanceOfSatisfying(TrinoException.class, exception -> assertThat(exception.getErrorCode()).isEqualTo(OPENSEARCH_QUERY_FAILURE.toErrorCode()));
+    }
+
+    @Test
+    public void testStatisticalValues()
+            throws IOException
+    {
+        Aggregations aggregations = parse("{" + statisticalResults(5, "2.0", "2.5") + "}");
+
+        Result result = AggregationResponseReader.read(aggregations, 5, ImmutableList.of(), STATISTICAL);
+
+        assertThat(result.rows()).singleElement().satisfies(row -> assertThat(row)
+                .containsEntry("stddev_samp", Math.sqrt(2.5))
+                .containsEntry("stddev_pop", Math.sqrt(2.0))
+                .containsEntry("var_samp", 2.5)
+                .containsEntry("var_pop", 2.0));
+    }
+
+    @Test
+    public void testSampleStatisticsOverOneValueAreNull()
+            throws IOException
+    {
+        Aggregations aggregations = parse("{" + statisticalResults(1, "0.0", null) + "}");
+
+        Result result = AggregationResponseReader.read(aggregations, 1, ImmutableList.of(), STATISTICAL);
+
+        Map<String, Object> expected = new HashMap<>();
+        expected.put("stddev_samp", null);
+        expected.put("var_samp", null);
+        expected.put("stddev_pop", 0.0);
+        expected.put("var_pop", 0.0);
+        assertThat(result.rows()).containsExactly(expected);
+    }
+
+    @Test
+    public void testStatisticalOverEmptyInputIsNull()
+            throws IOException
+    {
+        Aggregations aggregations = parse("{" + statisticalResults(0, null, null) + "}");
+
+        Result result = AggregationResponseReader.read(aggregations, 0, ImmutableList.of(), STATISTICAL);
+
+        Map<String, Object> expected = new HashMap<>();
+        expected.put("stddev_samp", null);
+        expected.put("var_samp", null);
+        expected.put("stddev_pop", null);
+        expected.put("var_pop", null);
+        assertThat(result.rows()).containsExactly(expected);
+    }
+
+    @Test
+    public void testStatisticalInGroupedAggregation()
+            throws IOException
+    {
+        Aggregations aggregations = parse(
+                """
+                {
+                  "composite#groupBy": {
+                    "after_key": {"kind": "b"},
+                    "buckets": [
+                      {"key": {"kind": "a"}, "doc_count": 5, %s},
+                      {"key": {"kind": "b"}, "doc_count": 1, %s}
+                    ]
+                  }
+                }
+                """.formatted(statisticalResults(5, "2.0", "2.5"), statisticalResults(1, "0.0", null)));
+
+        Result result = AggregationResponseReader.read(aggregations, 6, ImmutableList.of(new TermAggregation("kind", VARCHAR)), STATISTICAL);
+
+        assertThat(result.rows()).hasSize(2);
+        assertThat(result.rows().get(0)).containsEntry("kind", "a").containsEntry("var_samp", 2.5).containsEntry("var_pop", 2.0);
+        assertThat(result.rows().get(1)).containsEntry("kind", "b").containsEntry("var_samp", null).containsEntry("var_pop", 0.0);
+    }
+
+    /**
+     * One extended_stats result per function, named after the function. Population statistics are null for an empty input
+     * and sample statistics are null below two values, as OpenSearch reports NaN as null in the response.
+     */
+    private static String statisticalResults(int count, String variancePopulation, String varianceSampling)
+    {
+        String stdPopulation = variancePopulation == null ? null : Double.toString(Math.sqrt(Double.parseDouble(variancePopulation)));
+        String stdSampling = varianceSampling == null ? null : Double.toString(Math.sqrt(Double.parseDouble(varianceSampling)));
+        return Stream.of("stddev_samp", "stddev_pop", "var_samp", "var_pop")
+                .map(alias -> """
+                              "extended_stats#%s": {"count": %s, "min": 1.0, "max": 5.0, "avg": 3.0, "sum": 15.0, "sum_of_squares": 55.0,
+                                "variance": %s, "variance_population": %s, "variance_sampling": %s,
+                                "std_deviation": %s, "std_deviation_population": %s, "std_deviation_sampling": %s,
+                                "std_deviation_bounds": {"upper": null, "lower": null, "upper_population": null, "lower_population": null, "upper_sampling": null, "lower_sampling": null}}
+                              """.formatted(alias, count, variancePopulation, variancePopulation, varianceSampling, stdPopulation, stdPopulation, stdSampling))
+                .collect(Collectors.joining(","));
     }
 
     private static String bigintSum(double sum)

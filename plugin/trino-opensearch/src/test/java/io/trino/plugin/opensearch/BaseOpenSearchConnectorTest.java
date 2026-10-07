@@ -30,6 +30,7 @@ import io.trino.testing.MaterializedResult;
 import io.trino.testing.QueryRunner;
 import io.trino.testing.TestingConnectorBehavior;
 import org.apache.http.HttpHost;
+import org.assertj.core.data.Percentage;
 import org.intellij.lang.annotations.Language;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Disabled;
@@ -351,6 +352,87 @@ public abstract class BaseOpenSearchConnectorTest
     {
         return Session.builder(getSession())
                 .setCatalogSessionProperty(getSession().getCatalog().orElseThrow(), "bigint_aggregation_pushdown_enabled", String.valueOf(enabled))
+                .build();
+    }
+
+    @Test
+    public void testStatisticalAggregatesWithPushdownEnabled()
+            throws Exception
+    {
+        String tableName = "test_statistical_aggregation_" + randomNameSuffix();
+        @Language("JSON")
+        String properties =
+                """
+                {
+                    "properties": {
+                        "g": { "type": "keyword" },
+                        "v": { "type": "double" }
+                    }
+                }
+                """;
+
+        createIndex(tableName, properties);
+        try {
+            index(tableName, ImmutableMap.of("g", "a", "v", 2.0));
+            index(tableName, ImmutableMap.of("g", "a", "v", 4.0));
+            index(tableName, ImmutableMap.of("g", "a", "v", 4.0));
+            index(tableName, ImmutableMap.of("g", "a", "v", 6.0));
+            index(tableName, ImmutableMap.of("g", "b", "v", 3.0));
+            index(tableName, ImmutableMap.of("g", "b", "v", 7.0));
+
+            Session enabled = statisticalSession(true);
+            Session disabled = statisticalSession(false);
+
+            // with the option off, the functions stay in Trino
+            assertThat(query(disabled, format("SELECT stddev(v), variance(v) FROM %s", tableName)))
+                    .isNotFullyPushedDown(AggregationNode.class);
+            assertThat(query(getSession(), format("SELECT stddev(v), variance(v) FROM %s", tableName)))
+                    .isNotFullyPushedDown(AggregationNode.class);
+
+            String global = format("SELECT stddev(v), stddev_samp(v), stddev_pop(v), variance(v), var_samp(v), var_pop(v) FROM %s", tableName);
+            assertThat(query(enabled, global)).isFullyPushedDown();
+            assertStatisticsClose(computeActual(enabled, global), computeActual(disabled, global));
+
+            String grouped = format("SELECT g, stddev(v), stddev_pop(v), variance(v), var_pop(v) FROM %s GROUP BY g", tableName);
+            assertThat(query(enabled, grouped)).isFullyPushedDown();
+            // the order is applied in Trino, so it does not prevent the push down above
+            assertStatisticsClose(computeActual(enabled, grouped + " ORDER BY g"), computeActual(disabled, grouped + " ORDER BY g"));
+
+            // sample statistics over one value are NULL and population statistics are 0
+            assertThat(query(enabled, format("SELECT stddev(v), var_samp(v), stddev_pop(v), var_pop(v) FROM %s WHERE v = 2", tableName)))
+                    .matches("VALUES (CAST(NULL AS DOUBLE), CAST(NULL AS DOUBLE), DOUBLE '0.0', DOUBLE '0.0')")
+                    .isFullyPushedDown();
+            // all statistics over an empty input are NULL
+            assertThat(query(enabled, format("SELECT stddev(v), var_samp(v), stddev_pop(v), var_pop(v) FROM %s WHERE v > 100", tableName)))
+                    .matches("VALUES (CAST(NULL AS DOUBLE), CAST(NULL AS DOUBLE), CAST(NULL AS DOUBLE), CAST(NULL AS DOUBLE))")
+                    .isFullyPushedDown();
+        }
+        finally {
+            deleteIndex(tableName);
+        }
+    }
+
+    private static void assertStatisticsClose(MaterializedResult actual, MaterializedResult expected)
+    {
+        assertThat(actual.getRowCount()).isEqualTo(expected.getRowCount());
+        for (int row = 0; row < expected.getRowCount(); row++) {
+            List<Object> actualFields = actual.getMaterializedRows().get(row).getFields();
+            List<Object> expectedFields = expected.getMaterializedRows().get(row).getFields();
+            for (int column = 0; column < expectedFields.size(); column++) {
+                if (expectedFields.get(column) instanceof Double expectedValue) {
+                    assertThat((Double) actualFields.get(column)).isCloseTo(expectedValue, Percentage.withPercentage(0.0001));
+                }
+                else {
+                    assertThat(actualFields.get(column)).isEqualTo(expectedFields.get(column));
+                }
+            }
+        }
+    }
+
+    private Session statisticalSession(boolean enabled)
+    {
+        return Session.builder(getSession())
+                .setCatalogSessionProperty(getSession().getCatalog().orElseThrow(), "statistical_pushdown_enabled", String.valueOf(enabled))
                 .build();
     }
 

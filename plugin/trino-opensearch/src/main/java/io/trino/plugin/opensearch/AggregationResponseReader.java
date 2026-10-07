@@ -18,6 +18,7 @@ import jakarta.annotation.Nullable;
 import org.opensearch.search.aggregations.Aggregation;
 import org.opensearch.search.aggregations.Aggregations;
 import org.opensearch.search.aggregations.bucket.composite.CompositeAggregation;
+import org.opensearch.search.aggregations.metrics.ExtendedStats;
 import org.opensearch.search.aggregations.metrics.NumericMetricsAggregation;
 import org.opensearch.search.aggregations.metrics.Stats;
 import org.opensearch.search.aggregations.metrics.ValueCount;
@@ -32,7 +33,11 @@ import static com.google.common.base.Verify.verifyNotNull;
 import static io.trino.plugin.opensearch.MetricAggregation.COUNT;
 import static io.trino.plugin.opensearch.MetricAggregation.MAX;
 import static io.trino.plugin.opensearch.MetricAggregation.MIN;
+import static io.trino.plugin.opensearch.MetricAggregation.STDDEV_POP;
+import static io.trino.plugin.opensearch.MetricAggregation.STDDEV_SAMP;
 import static io.trino.plugin.opensearch.MetricAggregation.SUM;
+import static io.trino.plugin.opensearch.MetricAggregation.VAR_POP;
+import static io.trino.plugin.opensearch.MetricAggregation.VAR_SAMP;
 import static io.trino.plugin.opensearch.OpenSearchErrorCode.OPENSEARCH_QUERY_FAILURE;
 import static io.trino.plugin.opensearch.OpenSearchQueryBuilder.COMPOSITE_AGGREGATION_NAME;
 import static io.trino.spi.type.BigintType.BIGINT;
@@ -106,6 +111,7 @@ final class AggregationResponseReader
             case COUNT -> ((ValueCount) aggregation).getValue();
             case SUM -> checkBigintPrecision(metric, sumValue((Stats) aggregation));
             case MIN, MAX -> checkBigintPrecision(metric, singleValue((NumericMetricsAggregation.SingleValue) aggregation));
+            case STDDEV_SAMP, STDDEV_POP, VAR_SAMP, VAR_POP -> statisticalValue(metric.functionName(), (ExtendedStats) aggregation);
             default -> singleValue((NumericMetricsAggregation.SingleValue) aggregation);
         };
     }
@@ -135,6 +141,28 @@ final class AggregationResponseReader
             return null;
         }
         return stats.getSum();
+    }
+
+    @Nullable
+    private static Double statisticalValue(String functionName, ExtendedStats stats)
+    {
+        long count = stats.getCount();
+        boolean sample = functionName.equals(STDDEV_SAMP) || functionName.equals(VAR_SAMP);
+        // SQL requires NULL for the sample statistics over fewer than two values and for any statistic over an empty input
+        if (count == 0 || (sample && count < 2)) {
+            return null;
+        }
+        double value = switch (functionName) {
+            case STDDEV_SAMP -> stats.getStdDeviationSampling();
+            case STDDEV_POP -> stats.getStdDeviationPopulation();
+            case VAR_SAMP -> stats.getVarianceSampling();
+            case VAR_POP -> stats.getVariancePopulation();
+            default -> throw new IllegalArgumentException("Unsupported statistical function: " + functionName);
+        };
+        if (Double.isNaN(value) || Double.isInfinite(value)) {
+            return null;
+        }
+        return value;
     }
 
     @Nullable

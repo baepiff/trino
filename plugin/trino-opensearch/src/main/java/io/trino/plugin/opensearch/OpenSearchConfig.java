@@ -64,6 +64,7 @@ public class OpenSearchConfig
     private boolean textEqualityPushdownEnabled;
     private boolean textGroupByPushdownEnabled;
     private boolean bigintAggregationPushdownEnabled;
+    private boolean statisticalPushdownEnabled;
     private int maxAggregationBuckets = 65_535;
 
     private Security security;
@@ -398,6 +399,20 @@ public class OpenSearchConfig
     public OpenSearchConfig setBigintAggregationPushdownEnabled(boolean bigintAggregationPushdownEnabled)
     {
         this.bigintAggregationPushdownEnabled = bigintAggregationPushdownEnabled;
+        return this;
+    }
+
+    public boolean isStatisticalPushdownEnabled()
+    {
+        return statisticalPushdownEnabled;
+    }
+
+    @Config("opensearch.statistical-pushdown-enabled")
+    @ConfigDescription("Push down stddev, stddev_samp, stddev_pop, variance, var_samp and var_pop on numeric columns. " +
+            "OpenSearch derives them from the sum of squares, so results can be imprecise or wrong for large values with a small spread")
+    public OpenSearchConfig setStatisticalPushdownEnabled(boolean statisticalPushdownEnabled)
+    {
+        this.statisticalPushdownEnabled = statisticalPushdownEnabled;
         return this;
     }
 
