@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.opensearch;
 
+import com.google.common.collect.ImmutableSet;
 import io.trino.plugin.opensearch.client.IndexMetadata;
 import io.trino.plugin.opensearch.decoders.BooleanDecoder;
 import io.trino.plugin.opensearch.decoders.DoubleDecoder;
@@ -33,6 +34,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 import static io.trino.plugin.opensearch.TestOpenSearchMetadata.bigintColumn;
 import static io.trino.plugin.opensearch.TestOpenSearchMetadata.keywordColumn;
@@ -42,6 +44,8 @@ import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.RealType.REAL;
+import static io.trino.spi.type.SmallintType.SMALLINT;
+import static io.trino.spi.type.TinyintType.TINYINT;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -133,6 +137,42 @@ public class TestAggregationModel
         for (String name : List.of("min", "max", "sum", "avg")) {
             assertThat(MetricAggregation.from(function(name, BIGINT, "regionkey", BIGINT), assignments, "a", MetricAggregation.DEFAULT_FUNCTIONS, true)).as(name).isPresent();
         }
+    }
+
+    @Test
+    public void testStatisticalFunctionsAcceptedInputs()
+    {
+        Set<String> allowed = ImmutableSet.<String>builder()
+                .addAll(MetricAggregation.DEFAULT_FUNCTIONS)
+                .addAll(MetricAggregation.STATISTICAL_FUNCTIONS)
+                .build();
+        for (String name : List.of("stddev_samp", "stddev_pop", "var_samp", "var_pop", "stddev", "variance")) {
+            for (Type type : List.of(TINYINT, SMALLINT, INTEGER, DOUBLE)) {
+                Map<String, ColumnHandle> assignments = Map.of("c", column("c", type, "double", true));
+                assertThat(MetricAggregation.from(function(name, DOUBLE, "c", type), assignments, "a", allowed, false)).as(name + " over " + type).isPresent();
+                // not allowed unless the statistical functions are in the allowed set
+                assertThat(MetricAggregation.from(function(name, DOUBLE, "c", type), assignments, "a")).as(name + " over " + type).isEmpty();
+            }
+            // BIGINT and REAL are rejected, even when BIGINT input is allowed
+            assertThat(MetricAggregation.from(function(name, DOUBLE, "b", BIGINT), Map.of("b", bigintColumn("b")), "a", allowed, true)).as(name + " over BIGINT").isEmpty();
+            assertThat(MetricAggregation.from(function(name, DOUBLE, "r", REAL), Map.of("r", column("r", REAL, "float", true)), "a", allowed, true)).as(name + " over REAL").isEmpty();
+        }
+    }
+
+    @Test
+    public void testStatisticalFunctionAliasesAreCanonicalized()
+    {
+        Set<String> allowed = MetricAggregation.STATISTICAL_FUNCTIONS;
+        Map<String, ColumnHandle> assignments = Map.of("d", column("d", DOUBLE, "double", true));
+
+        assertThat(MetricAggregation.canonicalFunctionName("stddev")).isEqualTo("stddev_samp");
+        assertThat(MetricAggregation.canonicalFunctionName("variance")).isEqualTo("var_samp");
+        assertThat(MetricAggregation.canonicalFunctionName("var_pop")).isEqualTo("var_pop");
+        assertThat(MetricAggregation.canonicalFunctionName("sum")).isEqualTo("sum");
+        assertThat(MetricAggregation.from(function("stddev", DOUBLE, "d", DOUBLE), assignments, "a", allowed, false))
+                .hasValue(new MetricAggregation("stddev_samp", DOUBLE, Optional.of(column("d", DOUBLE, "double", true)), "a"));
+        assertThat(MetricAggregation.from(function("variance", DOUBLE, "d", DOUBLE), assignments, "a", allowed, false))
+                .hasValue(new MetricAggregation("var_samp", DOUBLE, Optional.of(column("d", DOUBLE, "double", true)), "a"));
     }
 
     @Test

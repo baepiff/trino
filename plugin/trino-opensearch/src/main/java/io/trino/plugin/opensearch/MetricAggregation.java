@@ -40,6 +40,12 @@ public record MetricAggregation(String functionName, Type outputType, Optional<O
     public static final String SUM = "sum";
     public static final String AVG = "avg";
 
+    public static final String STDDEV_SAMP = "stddev_samp";
+    public static final String STDDEV_POP = "stddev_pop";
+    public static final String VAR_SAMP = "var_samp";
+    public static final String VAR_POP = "var_pop";
+
+    public static final Set<String> STATISTICAL_FUNCTIONS = ImmutableSet.of(STDDEV_SAMP, STDDEV_POP, VAR_SAMP, VAR_POP);
     public static final Set<String> DEFAULT_FUNCTIONS = ImmutableSet.of(COUNT, MIN, MAX, SUM, AVG);
 
     public MetricAggregation
@@ -66,7 +72,7 @@ public record MetricAggregation(String functionName, Type outputType, Optional<O
             return Optional.empty();
         }
 
-        String functionName = function.getFunctionName();
+        String functionName = canonicalFunctionName(function.getFunctionName());
         if (!allowedFunctions.contains(functionName)) {
             return Optional.empty();
         }
@@ -86,6 +92,15 @@ public record MetricAggregation(String functionName, Type outputType, Optional<O
         return Optional.of(new MetricAggregation(functionName, function.getOutputType(), Optional.of(column), alias));
     }
 
+    public static String canonicalFunctionName(String functionName)
+    {
+        return switch (functionName) {
+            case "stddev" -> STDDEV_SAMP;
+            case "variance" -> VAR_SAMP;
+            default -> functionName;
+        };
+    }
+
     private static boolean isSupportedInput(String functionName, Type inputType, boolean allowBigintInput)
     {
         return switch (functionName) {
@@ -96,6 +111,9 @@ public record MetricAggregation(String functionName, Type outputType, Optional<O
             case MIN, MAX -> (allowBigintInput && inputType.equals(BIGINT)) || inputType.equals(TINYINT) || inputType.equals(SMALLINT) || inputType.equals(INTEGER) || inputType.equals(REAL) || inputType.equals(DOUBLE);
             // REAL is excluded: OpenSearch accumulates in double while Trino accumulates in single precision
             case SUM, AVG -> (allowBigintInput && inputType.equals(BIGINT)) || inputType.equals(TINYINT) || inputType.equals(SMALLINT) || inputType.equals(INTEGER) || inputType.equals(DOUBLE);
+            // BIGINT and REAL are excluded: the variance is derived from the sum of squares, which overflows 2^53 for large BIGINT values,
+            // and OpenSearch accumulates in double while Trino accumulates REAL in single precision
+            case STDDEV_SAMP, STDDEV_POP, VAR_SAMP, VAR_POP -> inputType.equals(TINYINT) || inputType.equals(SMALLINT) || inputType.equals(INTEGER) || inputType.equals(DOUBLE);
             default -> false;
         };
     }

@@ -31,6 +31,7 @@ public final class OpenSearchSessionProperties
     private static final String TEXT_EQUALITY_PUSHDOWN_ENABLED = "text_equality_pushdown_enabled";
     public static final String TEXT_GROUPBY_PUSHDOWN_ENABLED = "text_groupby_pushdown_enabled";
     public static final String BIGINT_AGGREGATION_PUSHDOWN_ENABLED = "bigint_aggregation_pushdown_enabled";
+    public static final String STATISTICAL_PUSHDOWN_ENABLED = "statistical_pushdown_enabled";
 
     private final List<PropertyMetadata<?>> sessionProperties;
 
@@ -62,6 +63,11 @@ public final class OpenSearchSessionProperties
                         BIGINT_AGGREGATION_PUSHDOWN_ENABLED,
                         "Push down min, max, sum and avg on BIGINT columns. The query fails if a min, max or sum result has an absolute value of 2^53 or more",
                         openSearchConfig.isBigintAggregationPushdownEnabled(),
+                        false))
+                .add(booleanProperty(
+                        STATISTICAL_PUSHDOWN_ENABLED,
+                        "Push down stddev and variance functions. OpenSearch derives them from the sum of squares, so results can be imprecise or wrong for large values with a small spread",
+                        openSearchConfig.isStatisticalPushdownEnabled(),
                         false))
                 .build();
     }
@@ -95,5 +101,10 @@ public final class OpenSearchSessionProperties
     public static boolean isBigintAggregationPushdownEnabled(ConnectorSession session)
     {
         return session.getProperty(BIGINT_AGGREGATION_PUSHDOWN_ENABLED, Boolean.class);
+    }
+
+    public static boolean isStatisticalPushdownEnabled(ConnectorSession session)
+    {
+        return session.getProperty(STATISTICAL_PUSHDOWN_ENABLED, Boolean.class);
     }
 }
