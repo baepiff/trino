@@ -120,6 +120,7 @@ import static io.trino.plugin.opensearch.OpenSearchErrorCode.OPENSEARCH_INVALID_
 import static io.trino.plugin.opensearch.OpenSearchSessionProperties.isAggregationPushdownEnabled;
 import static io.trino.plugin.opensearch.OpenSearchSessionProperties.isBigintAggregationPushdownEnabled;
 import static io.trino.plugin.opensearch.OpenSearchSessionProperties.isProjectionPushdownEnabled;
+import static io.trino.plugin.opensearch.OpenSearchSessionProperties.isStatisticalPushdownEnabled;
 import static io.trino.plugin.opensearch.OpenSearchSessionProperties.isTextEqualityPushdownEnabled;
 import static io.trino.plugin.opensearch.OpenSearchSessionProperties.isTextGroupByPushdownEnabled;
 import static io.trino.plugin.opensearch.OpenSearchTableHandle.Type.AGGREGATION;
@@ -590,6 +591,10 @@ public class OpenSearchMetadata
 
         boolean textGroupByPushdownEnabled = isTextGroupByPushdownEnabled(session);
         boolean bigintAggregationPushdownEnabled = isBigintAggregationPushdownEnabled(session);
+        Set<String> allowedFunctions = ImmutableSet.<String>builder()
+                .addAll(MetricAggregation.DEFAULT_FUNCTIONS)
+                .addAll(isStatisticalPushdownEnabled(session) ? MetricAggregation.STATISTICAL_FUNCTIONS : ImmutableSet.of())
+                .build();
         ImmutableList.Builder<TermAggregation> termAggregations = ImmutableList.builder();
         for (ColumnHandle columnHandle : groupingSets.getFirst()) {
             OpenSearchColumnHandle column = (OpenSearchColumnHandle) columnHandle;
@@ -611,7 +616,7 @@ public class OpenSearchMetadata
             AggregateFunction function = aggregates.get(index);
             String name = SYNTHETIC_COLUMN_NAME_PREFIX + index;
 
-            Optional<MetricAggregation> metricAggregation = MetricAggregation.from(function, assignments, name, MetricAggregation.DEFAULT_FUNCTIONS, bigintAggregationPushdownEnabled);
+            Optional<MetricAggregation> metricAggregation = MetricAggregation.from(function, assignments, name, allowedFunctions, bigintAggregationPushdownEnabled);
             Optional<OpenSearchColumnHandle> outputColumn = aggregationOutputColumn(name, function.getOutputType());
             if (metricAggregation.isEmpty() || outputColumn.isEmpty()) {
                 return Optional.empty();

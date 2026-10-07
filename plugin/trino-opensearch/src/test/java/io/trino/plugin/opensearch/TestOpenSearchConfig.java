@@ -62,6 +62,7 @@ public class TestOpenSearchConfig
                 .setTextEqualityPushdownEnabled(false)
                 .setTextGroupByPushdownEnabled(false)
                 .setBigintAggregationPushdownEnabled(false)
+                .setStatisticalPushdownEnabled(false)
                 .setMaxAggregationBuckets(65535)
                 .setSecurity(null));
     }
@@ -99,6 +100,7 @@ public class TestOpenSearchConfig
                 .put("opensearch.text-equality-pushdown-enabled", "true")
                 .put("opensearch.text-groupby-pushdown-enabled", "true")
                 .put("opensearch.bigint-aggregation-pushdown-enabled", "true")
+                .put("opensearch.statistical-pushdown-enabled", "true")
                 .put("opensearch.max-aggregation-buckets", "1000")
                 .put("opensearch.security", "AWS")
                 .buildOrThrow();
@@ -129,6 +131,7 @@ public class TestOpenSearchConfig
                 .setTextEqualityPushdownEnabled(true)
                 .setTextGroupByPushdownEnabled(true)
                 .setBigintAggregationPushdownEnabled(true)
+                .setStatisticalPushdownEnabled(true)
                 .setMaxAggregationBuckets(1000)
                 .setSecurity(AWS);
 

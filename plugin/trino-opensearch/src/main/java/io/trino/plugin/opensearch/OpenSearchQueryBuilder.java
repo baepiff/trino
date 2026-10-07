@@ -50,7 +50,11 @@ import static io.trino.plugin.opensearch.MetricAggregation.AVG;
 import static io.trino.plugin.opensearch.MetricAggregation.COUNT;
 import static io.trino.plugin.opensearch.MetricAggregation.MAX;
 import static io.trino.plugin.opensearch.MetricAggregation.MIN;
+import static io.trino.plugin.opensearch.MetricAggregation.STDDEV_POP;
+import static io.trino.plugin.opensearch.MetricAggregation.STDDEV_SAMP;
 import static io.trino.plugin.opensearch.MetricAggregation.SUM;
+import static io.trino.plugin.opensearch.MetricAggregation.VAR_POP;
+import static io.trino.plugin.opensearch.MetricAggregation.VAR_SAMP;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
 import static io.trino.spi.type.DoubleType.DOUBLE;
@@ -146,6 +150,7 @@ public final class OpenSearchQueryBuilder
             // stats instead of sum: the sum aggregation returns 0 for an empty input where SQL requires NULL
             case SUM -> AggregationBuilders.stats(alias).field(field);
             case AVG -> AggregationBuilders.avg(alias).field(field);
+            case STDDEV_SAMP, STDDEV_POP, VAR_SAMP, VAR_POP -> AggregationBuilders.extendedStats(alias).field(field);
             default -> throw new IllegalArgumentException("Unsupported aggregation function: " + aggregation.functionName());
         };
         return Optional.of(builder);

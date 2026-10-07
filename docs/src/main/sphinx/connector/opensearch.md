@@ -107,6 +107,12 @@ The following table details all general configuration properties:
     `max` or `sum` result is not exact. The catalog session property
     `bigint_aggregation_pushdown_enabled` overrides this value for a session.
   - `false`
+* - `opensearch.statistical-pushdown-enabled`
+  - Push down `stddev`, `stddev_samp`, `stddev_pop`, `variance`, `var_samp` and
+    `var_pop`, see [](opensearch-statistical-pushdown). Results can be
+    imprecise. The catalog session property `statistical_pushdown_enabled`
+    overrides this value for a session.
+  - `false`
 * - `opensearch.max-aggregation-buckets`
   - Maximum number of buckets requested in each aggregation search request. The
     connector pages through larger results. Must not exceed the cluster
@@ -602,6 +608,9 @@ aggregate functions:
 * `min`, `max` on columns of type `TINYINT`, `SMALLINT`, `INTEGER`, `REAL`,
   `DOUBLE`
 * `sum`, `avg` on columns of type `DOUBLE`
+* `stddev`, `stddev_samp`, `stddev_pop`, `variance`, `var_samp`, `var_pop` on
+  columns of type `TINYINT`, `SMALLINT`, `INTEGER`, `DOUBLE`, when enabled, see
+  [](opensearch-statistical-pushdown)
 
 Aggregation push down is applied only when all of the following hold:
 
@@ -723,6 +732,31 @@ without the field or with a `null` value form the `NULL` group, and the empty
 string forms a group of its own, as in Trino. Grouping by `text` and other
 supported columns together is pushed down as well. Sorting by, and aggregate
 functions over, `text` fields are not pushed down.
+
+(opensearch-statistical-pushdown)=
+#### `stddev` and `variance`
+
+The connector can push down `stddev`, `stddev_samp`, `stddev_pop`, `variance`,
+`var_samp` and `var_pop` with the OpenSearch `extended_stats` aggregation. This
+push down is disabled by default. Set `opensearch.statistical-pushdown-enabled`
+to `true` in the catalog, or the catalog session property
+`statistical_pushdown_enabled` to `true` for a session, to enable it. `stddev`
+is an alias of `stddev_samp` and `variance` is an alias of `var_samp`.
+
+OpenSearch derives the variance from the sum of squares, which loses precision
+for large values with a small spread. The five values `1000000000` to
+`1000000004` have a population variance of 2.0 and a sample variance of 2.5,
+but OpenSearch 2.19.4 returns 0.0 for the variances and standard deviations of
+these values. Enable this push down only when the data does not have this
+shape, or when approximate results are acceptable.
+
+The sample functions return `NULL` for fewer than two values, and the
+population functions return `0.0` for a single value. All functions return
+`NULL` for an empty input. The push down applies to columns of type `TINYINT`,
+`SMALLINT`, `INTEGER` and `DOUBLE`. Trino evaluates these functions over a cast
+of an integer column to `DOUBLE`, and a cast between the table scan and the
+aggregation prevents the push down, so in practice only `DOUBLE` columns are
+pushed down. `BIGINT` and `REAL` columns are never pushed down.
 
 (opensearch-topn-pushdown)=
 ### TopN push down

@@ -235,6 +235,26 @@ public class TestOpenSearchQueryBuilder
     }
 
     @Test
+    public void testStatisticalAggregationUsesExtendedStats()
+    {
+        List<AggregationBuilder> builders = buildAggregationQuery(
+                ImmutableList.of(),
+                ImmutableList.of(
+                        new MetricAggregation("stddev_samp", DOUBLE, Optional.of(SCORE), "_pushdown_0"),
+                        new MetricAggregation("stddev_pop", DOUBLE, Optional.of(SCORE), "_pushdown_1"),
+                        new MetricAggregation("var_samp", DOUBLE, Optional.of(AGE), "_pushdown_2"),
+                        new MetricAggregation("var_pop", DOUBLE, Optional.of(AGE), "_pushdown_3")),
+                100,
+                Optional.empty());
+
+        assertThat(builders).containsExactly(
+                AggregationBuilders.extendedStats("_pushdown_0").field("score"),
+                AggregationBuilders.extendedStats("_pushdown_1").field("score"),
+                AggregationBuilders.extendedStats("_pushdown_2").field("age"),
+                AggregationBuilders.extendedStats("_pushdown_3").field("age"));
+    }
+
+    @Test
     public void testCountStarOnlyBuildsNoAggregations()
     {
         assertThat(buildAggregationQuery(
