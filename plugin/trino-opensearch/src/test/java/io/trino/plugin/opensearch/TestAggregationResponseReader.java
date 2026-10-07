@@ -15,6 +15,7 @@ package io.trino.plugin.opensearch;
 
 import com.google.common.collect.ImmutableList;
 import io.trino.plugin.opensearch.AggregationResponseReader.Result;
+import io.trino.spi.TrinoException;
 import org.junit.jupiter.api.Test;
 import org.opensearch.common.xcontent.json.JsonXContent;
 import org.opensearch.core.ParseField;
@@ -36,6 +37,8 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
 
+import static io.trino.plugin.opensearch.OpenSearchErrorCode.OPENSEARCH_QUERY_FAILURE;
+import static io.trino.plugin.opensearch.TestOpenSearchMetadata.bigintColumn;
 import static io.trino.plugin.opensearch.TestOpenSearchMetadata.integerColumn;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
@@ -43,6 +46,7 @@ import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestAggregationResponseReader
 {
@@ -60,6 +64,11 @@ public class TestAggregationResponseReader
     private static final MetricAggregation AVG_VALUE = new MetricAggregation("avg", DOUBLE, Optional.of(integerColumn("v")), "a_value");
     private static final MetricAggregation MIN_VALUE = new MetricAggregation("min", INTEGER, Optional.of(integerColumn("v")), "min_value");
     private static final MetricAggregation MAX_VALUE = new MetricAggregation("max", INTEGER, Optional.of(integerColumn("v")), "max_value");
+
+    private static final MetricAggregation BIGINT_SUM = new MetricAggregation("sum", BIGINT, Optional.of(bigintColumn("big")), "big_sum");
+    private static final MetricAggregation BIGINT_MIN = new MetricAggregation("min", BIGINT, Optional.of(bigintColumn("big")), "big_min");
+    private static final MetricAggregation BIGINT_MAX = new MetricAggregation("max", BIGINT, Optional.of(bigintColumn("big")), "big_max");
+    private static final MetricAggregation BIGINT_AVG = new MetricAggregation("avg", DOUBLE, Optional.of(bigintColumn("big")), "big_avg");
 
     @Test
     public void testGlobalAggregations()
@@ -214,6 +223,108 @@ public class TestAggregationResponseReader
         assertThat(result.rows()).isEmpty();
         assertThat(result.afterKey()).isEmpty();
         assertThat(result.bucketCount()).isEqualTo(0);
+    }
+
+    @Test
+    public void testBigintGuardBoundary()
+            throws IOException
+    {
+        Result result = AggregationResponseReader.read(
+                parse(bigintSum(9007199254740991.0)), 1, ImmutableList.of(), ImmutableList.of(BIGINT_SUM));
+        assertThat(result.rows()).singleElement().satisfies(row -> assertThat(row).containsEntry("big_sum", 9007199254740991.0));
+
+        for (double value : new double[] {9007199254740992.0, -9007199254740992.0}) {
+            Aggregations aggregations = parse(bigintSum(value));
+            assertThatThrownBy(() -> AggregationResponseReader.read(aggregations, 1, ImmutableList.of(), ImmutableList.of(BIGINT_SUM)))
+                    .isInstanceOfSatisfying(TrinoException.class, exception -> assertThat(exception.getErrorCode()).isEqualTo(OPENSEARCH_QUERY_FAILURE.toErrorCode()))
+                    .hasMessageContaining("bigint-aggregation-pushdown-enabled")
+                    .hasMessageContaining("sum")
+                    .hasMessageContaining("big");
+        }
+    }
+
+    @Test
+    public void testBigintGuardAppliesToMinAndMax()
+            throws IOException
+    {
+        Aggregations aggregations = parse(
+                """
+                {
+                  "min#big_min": {"value": -9.007199254740992E15},
+                  "max#big_max": {"value": 9.007199254740992E15}
+                }
+                """);
+        assertThatThrownBy(() -> AggregationResponseReader.read(aggregations, 1, ImmutableList.of(), ImmutableList.of(BIGINT_MIN)))
+                .isInstanceOf(TrinoException.class)
+                .hasMessageContaining("min");
+        assertThatThrownBy(() -> AggregationResponseReader.read(aggregations, 1, ImmutableList.of(), ImmutableList.of(BIGINT_MAX)))
+                .isInstanceOf(TrinoException.class)
+                .hasMessageContaining("max");
+    }
+
+    @Test
+    public void testBigintAvgIsNotGuarded()
+            throws IOException
+    {
+        Result result = AggregationResponseReader.read(
+                parse(
+                        """
+                        {"avg#big_avg": {"value": 1.0E16}}
+                        """),
+                1,
+                ImmutableList.of(),
+                ImmutableList.of(BIGINT_AVG));
+        assertThat(result.rows()).singleElement().satisfies(row -> assertThat(row).containsEntry("big_avg", 1.0e16));
+    }
+
+    @Test
+    public void testBigintGuardOnEmptyInput()
+            throws IOException
+    {
+        Aggregations aggregations = parse(
+                """
+                {
+                  "stats#big_sum": {"count": 0, "min": null, "max": null, "avg": null, "sum": 0.0},
+                  "min#big_min": {"value": null},
+                  "max#big_max": {"value": null}
+                }
+                """);
+        Result result = AggregationResponseReader.read(aggregations, 0, ImmutableList.of(), ImmutableList.of(BIGINT_SUM, BIGINT_MIN, BIGINT_MAX));
+
+        Map<String, Object> expected = new HashMap<>();
+        expected.put("big_sum", null);
+        expected.put("big_min", null);
+        expected.put("big_max", null);
+        assertThat(result.rows()).containsExactly(expected);
+    }
+
+    @Test
+    public void testGroupedBigintGuardFailsWholeQuery()
+            throws IOException
+    {
+        Aggregations aggregations = parse(
+                """
+                {
+                  "composite#groupBy": {
+                    "after_key": {"kind": "b"},
+                    "buckets": [
+                      {"key": {"kind": "a"}, "doc_count": 1, "stats#big_sum": {"count": 1, "min": 1.0, "max": 1.0, "avg": 1.0, "sum": 1.0}},
+                      {"key": {"kind": "b"}, "doc_count": 1, "stats#big_sum": {"count": 1, "min": 9.007199254740992E15, "max": 9.007199254740992E15, "avg": 9.007199254740992E15, "sum": 9.007199254740992E15}}
+                    ]
+                  }
+                }
+                """);
+        assertThatThrownBy(() -> AggregationResponseReader.read(
+                aggregations,
+                2,
+                ImmutableList.of(new TermAggregation("kind", VARCHAR)),
+                ImmutableList.of(BIGINT_SUM)))
+                .isInstanceOfSatisfying(TrinoException.class, exception -> assertThat(exception.getErrorCode()).isEqualTo(OPENSEARCH_QUERY_FAILURE.toErrorCode()));
+    }
+
+    private static String bigintSum(double sum)
+    {
+        return "{\"stats#big_sum\": {\"count\": 1, \"min\": 1.0, \"max\": 1.0, \"avg\": 1.0, \"sum\": %s}}".formatted(sum);
     }
 
     private static NamedXContentRegistry.Entry entry(String name, ContextParser<Object, Aggregation> parser)
