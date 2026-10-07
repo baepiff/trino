@@ -353,6 +353,39 @@ public abstract class BaseOpenSearchConnectorTest
         }
     }
 
+    @Test
+    public void testBigintSumOfCancellingInexactValuesFailsWithPushdownEnabled()
+            throws Exception
+    {
+        String tableName = "test_bigint_sum_cancelling_" + randomNameSuffix();
+        @Language("JSON")
+        String properties =
+                """
+                {
+                    "properties": {
+                        "v": { "type": "long" }
+                    }
+                }
+                """;
+
+        createIndex(tableName, properties);
+        try {
+            // as doubles these are 2^53 and -2^53, which would sum to 0 instead of 1
+            index(tableName, ImmutableMap.of("v", 9007199254740993L));
+            index(tableName, ImmutableMap.of("v", -9007199254740992L));
+
+            assertTrinoExceptionThrownBy(() -> computeActual(bigintAggregationSession(true), format("SELECT sum(v) FROM %s", tableName)))
+                    .hasMessageContaining("bigint-aggregation-pushdown-enabled");
+
+            assertThat(query(bigintAggregationSession(false), format("SELECT sum(v) FROM %s", tableName)))
+                    .matches("VALUES BIGINT '1'")
+                    .isNotFullyPushedDown(AggregationNode.class);
+        }
+        finally {
+            deleteIndex(tableName);
+        }
+    }
+
     private Session bigintAggregationSession(boolean enabled)
     {
         return Session.builder(getSession())

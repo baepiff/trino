@@ -654,15 +654,18 @@ represent every `BIGINT` value. This push down is disabled by default. Set
 the catalog session property `bigint_aggregation_pushdown_enabled` to `true`
 for a session, to push down `min`, `max`, `sum` and `avg` over `BIGINT` columns.
 
-To avoid returning inexact values, the connector fails the query when a `min`,
-`max` or `sum` result has an absolute value of 2^53 (9007199254740992) or more.
-Below that limit the result of `min` and `max` is exact. A `sum` is exact when
-every intermediate sum stays below 2^53 in absolute value; a `sum` of values
-with mixed signs can round in an intermediate step even though its final result
-is small, and the connector cannot detect this. For a query with `GROUP BY`, a
-single group over the limit fails the whole query. The error message names the
-function and the column. To run such a query, disable the option for the
-session, and Trino computes the aggregation exactly.
+To avoid returning inexact values, the connector fails the query when a `min`
+or `max` result has an absolute value of 2^53 (9007199254740992) or more. Below
+that limit the result of `min` and `max` is exact. A `sum` fails when any single
+input value has an absolute value of 2^53 or more, because such a value is not
+exactly representable as a double. For data with both negative and positive
+values, a `sum` also fails when the number of values multiplied by the largest
+absolute value reaches 2^53, because an intermediate sum can then round even
+though the final result is small. A `sum` over non-negative data, such as
+durations, is checked only by its final value, which must stay below 2^53. For a
+query with `GROUP BY`, a single group that fails a check fails the whole query.
+The error message names the function and the column. To run such a query,
+disable the option for the session, and Trino computes the aggregation exactly.
 
 `avg` is not guarded, because it returns a `DOUBLE` in Trino as well. Its value
 can differ from the value that Trino computes for values above 2^53.
