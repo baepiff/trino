@@ -627,7 +627,7 @@ public class OpenSearchMetadata
                 false));
     }
 
-    private static Optional<OpenSearchColumnHandle> aggregationOutputColumn(String name, Type type)
+    static Optional<OpenSearchColumnHandle> aggregationOutputColumn(String name, Type type)
     {
         if (type.equals(BIGINT)) {
             return Optional.of(syntheticColumn(name, type, "long", new BigintDecoder.Descriptor(name)));
