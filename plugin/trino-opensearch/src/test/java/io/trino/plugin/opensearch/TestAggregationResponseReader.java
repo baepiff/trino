@@ -256,6 +256,22 @@ public class TestAggregationResponseReader
     }
 
     @Test
+    public void testSumOverNonBigintInputIsNotGuarded()
+            throws IOException
+    {
+        // the guard keys off the input column type: an INTEGER column sums to a BIGINT but cannot lose precision in the response
+        Result result = AggregationResponseReader.read(
+                parse(
+                        """
+                        {"stats#s_value": {"count": 1, "min": 1.0, "max": 1.0, "avg": 1.0, "sum": 9.007199254740992E15}}
+                        """),
+                1,
+                ImmutableList.of(),
+                ImmutableList.of(SUM_VALUE));
+        assertThat(result.rows()).singleElement().satisfies(row -> assertThat(row).containsEntry("s_value", 9.007199254740992e15));
+    }
+
+    @Test
     public void testBigintGuardAppliesToMinAndMax()
             throws IOException
     {
@@ -354,6 +370,23 @@ public class TestAggregationResponseReader
             throws IOException
     {
         Aggregations aggregations = parse("{" + statisticalResults(1, "0.0", null) + "}");
+
+        Result result = AggregationResponseReader.read(aggregations, 1, ImmutableList.of(), STATISTICAL);
+
+        Map<String, Object> expected = new HashMap<>();
+        expected.put("stddev_samp", null);
+        expected.put("var_samp", null);
+        expected.put("stddev_pop", 0.0);
+        expected.put("var_pop", 0.0);
+        assertThat(result.rows()).containsExactly(expected);
+    }
+
+    @Test
+    public void testSampleStatisticsOverOneValueAreNullEvenWhenResponseCarriesFiniteValues()
+            throws IOException
+    {
+        // the count check must not rely on the response reporting NaN (null) for the sampling values
+        Aggregations aggregations = parse("{" + statisticalResults(1, "0.0", "1.5") + "}");
 
         Result result = AggregationResponseReader.read(aggregations, 1, ImmutableList.of(), STATISTICAL);
 
