@@ -63,6 +63,7 @@ public class OpenSearchConfig
     private boolean aggregationPushdownEnabled = true;
     private boolean textEqualityPushdownEnabled;
     private boolean textGroupByPushdownEnabled;
+    private boolean bigintAggregationPushdownEnabled;
     private int maxAggregationBuckets = 65_535;
 
     private Security security;
@@ -383,6 +384,20 @@ public class OpenSearchConfig
     public OpenSearchConfig setTextGroupByPushdownEnabled(boolean textGroupByPushdownEnabled)
     {
         this.textGroupByPushdownEnabled = textGroupByPushdownEnabled;
+        return this;
+    }
+
+    public boolean isBigintAggregationPushdownEnabled()
+    {
+        return bigintAggregationPushdownEnabled;
+    }
+
+    @Config("opensearch.bigint-aggregation-pushdown-enabled")
+    @ConfigDescription("Push down min, max, sum and avg on BIGINT columns. OpenSearch computes them as doubles, " +
+            "so a min, max or sum result with an absolute value of 2^53 or more fails the query instead of returning an inexact value")
+    public OpenSearchConfig setBigintAggregationPushdownEnabled(boolean bigintAggregationPushdownEnabled)
+    {
+        this.bigintAggregationPushdownEnabled = bigintAggregationPushdownEnabled;
         return this;
     }
 

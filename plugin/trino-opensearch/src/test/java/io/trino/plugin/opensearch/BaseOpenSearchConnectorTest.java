@@ -282,13 +282,77 @@ public abstract class BaseOpenSearchConnectorTest
     }
 
     @Test
-    public void testBigintAggregatesAreNotPushedDown()
+    public void testBigintAggregatesAreNotPushedDownByDefault()
     {
         assertThat(query("SELECT sum(nationkey), min(nationkey), max(nationkey), avg(nationkey) FROM nation"))
                 .matches("VALUES (BIGINT '300', BIGINT '0', BIGINT '24', DOUBLE '12.0')")
                 .isNotFullyPushedDown(AggregationNode.class);
         assertThat(query("SELECT regionkey, sum(nationkey) FROM nation GROUP BY regionkey"))
                 .isNotFullyPushedDown(AggregationNode.class);
+    }
+
+    @Test
+    public void testBigintAggregatesWithPushdownEnabled()
+            throws Exception
+    {
+        Session enabled = bigintAggregationSession(true);
+
+        assertThat(query(enabled, "SELECT sum(nationkey), min(nationkey), max(nationkey), avg(nationkey) FROM nation"))
+                .matches("VALUES (BIGINT '300', BIGINT '0', BIGINT '24', DOUBLE '12.0')")
+                .isFullyPushedDown();
+        assertThat(query(enabled, "SELECT regionkey, sum(nationkey), min(nationkey), max(nationkey) FROM nation GROUP BY regionkey"))
+                .isFullyPushedDown();
+
+        String tableName = "test_bigint_aggregation_" + randomNameSuffix();
+        @Language("JSON")
+        String properties =
+                """
+                {
+                    "properties": {
+                        "g": { "type": "keyword" },
+                        "v": { "type": "long" }
+                    }
+                }
+                """;
+
+        createIndex(tableName, properties);
+        try {
+            // exact values below 2^53 round-trip as longs
+            index(tableName, ImmutableMap.of("g", "a", "v", 4503599627370496L));
+            index(tableName, ImmutableMap.of("g", "a", "v", 4503599627370495L));
+            index(tableName, ImmutableMap.of("g", "b", "v", -9007199254740991L));
+            assertThat(query(enabled, format("SELECT g, sum(v), min(v), max(v) FROM %s GROUP BY g", tableName)))
+                    .skippingTypesCheck()
+                    .matches("VALUES ('a', BIGINT '9007199254740991', BIGINT '4503599627370495', BIGINT '4503599627370496'), " +
+                            "('b', BIGINT '-9007199254740991', BIGINT '-9007199254740991', BIGINT '-9007199254740991')")
+                    .isFullyPushedDown();
+            assertThat(query(enabled, format("SELECT sum(v), min(v), max(v) FROM %s WHERE g = 'a'", tableName)))
+                    .matches("VALUES (BIGINT '9007199254740991', BIGINT '4503599627370495', BIGINT '4503599627370496')")
+                    .isFullyPushedDown();
+
+            // a result at 2^53 or above fails the query, also when it is only one of the groups
+            index(tableName, ImmutableMap.of("g", "c", "v", 9007199254740992L));
+            assertTrinoExceptionThrownBy(() -> computeActual(enabled, format("SELECT sum(v) FROM %s WHERE g = 'c'", tableName)))
+                    .hasMessageContaining("2^53")
+                    .hasMessageContaining("bigint-aggregation-pushdown-enabled");
+            assertTrinoExceptionThrownBy(() -> computeActual(enabled, format("SELECT g, sum(v) FROM %s GROUP BY g", tableName)))
+                    .hasMessageContaining("2^53");
+
+            // with the option off, Trino computes the exact value
+            assertThat(query(bigintAggregationSession(false), format("SELECT sum(v) FROM %s WHERE g = 'c'", tableName)))
+                    .matches("VALUES BIGINT '9007199254740992'")
+                    .isNotFullyPushedDown(AggregationNode.class);
+        }
+        finally {
+            deleteIndex(tableName);
+        }
+    }
+
+    private Session bigintAggregationSession(boolean enabled)
+    {
+        return Session.builder(getSession())
+                .setCatalogSessionProperty(getSession().getCatalog().orElseThrow(), "bigint_aggregation_pushdown_enabled", String.valueOf(enabled))
+                .build();
     }
 
     @Test

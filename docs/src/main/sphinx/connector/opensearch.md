@@ -101,6 +101,12 @@ The following table details all general configuration properties:
     not cover every value. The catalog session property
     `text_groupby_pushdown_enabled` overrides this value for a session.
   - `false`
+* - `opensearch.bigint-aggregation-pushdown-enabled`
+  - Push down `min`, `max`, `sum` and `avg` over `BIGINT` columns, see
+    [](opensearch-bigint-aggregation-pushdown). A query fails when a `min`,
+    `max` or `sum` result is not exact. The catalog session property
+    `bigint_aggregation_pushdown_enabled` overrides this value for a session.
+  - `false`
 * - `opensearch.max-aggregation-buckets`
   - Maximum number of buckets requested in each aggregation search request. The
     connector pages through larger results. Must not exceed the cluster
@@ -613,13 +619,12 @@ Aggregation push down is applied only when all of the following hold:
 * The query does not already have a pushed-down limit or TopN. For example,
   `SELECT count(*) FROM (SELECT * FROM t LIMIT 10)` is not pushed down.
 
-`min`, `max`, `sum` and `avg` over `BIGINT` columns are not pushed down because
-OpenSearch computes metric aggregations with double precision, which cannot
-represent all `BIGINT` values. `sum` and `avg` over `TINYINT`, `SMALLINT` and
-`INTEGER` columns are not pushed down either: Trino evaluates them over a cast
-of the column to `BIGINT`, and a cast between the table scan and the aggregation
-prevents the push down, so these aggregates stay in Trino. `min` and `max` over
-`keyword` columns are not pushed down.
+`min`, `max`, `sum` and `avg` over `BIGINT` columns are not pushed down by
+default, see [](opensearch-bigint-aggregation-pushdown). `sum` and `avg` over
+`TINYINT`, `SMALLINT` and `INTEGER` columns are not pushed down either: Trino
+evaluates them over a cast of the column to `BIGINT`, and a cast between the
+table scan and the aggregation prevents the push down, so these aggregates stay
+in Trino. `min` and `max` over `keyword` columns are not pushed down.
 
 Pushed-down aggregation, sorting and grouping use the OpenSearch doc values of
 a field, so the result can differ from a computation in Trino for `keyword`
@@ -630,6 +635,28 @@ returning partial results.
 
 Set `opensearch.aggregation-pushdown-enabled` to `false` to disable aggregation
 push down.
+
+(opensearch-bigint-aggregation-pushdown)=
+#### `min`, `max`, `sum` and `avg` on `BIGINT` columns
+
+OpenSearch computes metric aggregations with double precision, which cannot
+represent every `BIGINT` value. This push down is disabled by default. Set
+`opensearch.bigint-aggregation-pushdown-enabled` to `true` in the catalog, or
+the catalog session property `bigint_aggregation_pushdown_enabled` to `true`
+for a session, to push down `min`, `max`, `sum` and `avg` over `BIGINT` columns.
+
+To avoid returning inexact values, the connector fails the query when a `min`,
+`max` or `sum` result has an absolute value of 2^53 (9007199254740992) or more.
+Below that limit the result of `min` and `max` is exact. A `sum` is exact when
+every intermediate sum stays below 2^53 in absolute value; a `sum` of values
+with mixed signs can round in an intermediate step even though its final result
+is small, and the connector cannot detect this. For a query with `GROUP BY`, a
+single group over the limit fails the whole query. The error message names the
+function and the column. To run such a query, disable the option for the
+session, and Trino computes the aggregation exactly.
+
+`avg` is not guarded, because it returns a `DOUBLE` in Trino as well. Its value
+can differ from the value that Trino computes for values above 2^53.
 
 (opensearch-text-groupby-pushdown)=
 #### `GROUP BY` on `text` fields with a `keyword` sub-field
