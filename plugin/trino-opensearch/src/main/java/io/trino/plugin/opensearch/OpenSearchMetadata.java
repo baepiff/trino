@@ -116,7 +116,6 @@ import static io.airlift.slice.SliceUtf8.getCodePointAt;
 import static io.airlift.slice.SliceUtf8.lengthOfCodePoint;
 import static io.trino.plugin.base.projection.ApplyProjectionUtil.extractSupportedProjectedColumns;
 import static io.trino.plugin.base.projection.ApplyProjectionUtil.replaceWithNewVariables;
-import static io.trino.plugin.opensearch.OpenSearchErrorCode.OPENSEARCH_INVALID_METADATA;
 import static io.trino.plugin.opensearch.OpenSearchSessionProperties.isAggregationPushdownEnabled;
 import static io.trino.plugin.opensearch.OpenSearchSessionProperties.isBigintAggregationPushdownEnabled;
 import static io.trino.plugin.opensearch.OpenSearchSessionProperties.isProjectionPushdownEnabled;
