@@ -14,6 +14,7 @@
 package io.trino.plugin.opensearch;
 
 import com.google.common.collect.ImmutableMap;
+import org.apache.http.HttpHost;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.parallel.Isolated;
 import org.opensearch.action.index.IndexRequest;
@@ -22,6 +23,7 @@ import org.opensearch.action.search.SearchResponse;
 import org.opensearch.action.support.WriteRequest.RefreshPolicy;
 import org.opensearch.client.Request;
 import org.opensearch.client.RequestOptions;
+import org.opensearch.client.RestClient;
 import org.opensearch.client.RestHighLevelClient;
 import org.opensearch.search.aggregations.AggregationBuilders;
 import org.opensearch.search.aggregations.metrics.ExtendedStats;
@@ -39,7 +41,7 @@ public class TestOpenSearchExtendedStats
             throws IOException
     {
         try (OpenSearchServer server = new OpenSearchServer("opensearchproject/opensearch:2.19.4", false, ImmutableMap.of());
-                RestHighLevelClient client = RestClientUtils.createClient(server.getAddress())) {
+                RestHighLevelClient client = new RestHighLevelClient(RestClient.builder(new HttpHost(server.getAddress().getHost(), server.getAddress().getPort())))) {
             Request createIndex = new Request("PUT", "/precision");
             createIndex.setJsonEntity(
                     """

@@ -117,7 +117,7 @@ public class AggregateQueryPageSource
         }
         Result result = AggregationResponseReader.read(
                 response.getAggregations(),
-                response.getHits().getTotalHits().value(),
+                response.getHits().getTotalHits().value,
                 table.termAggregations(),
                 table.metricAggregations());
 
