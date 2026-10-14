@@ -92,6 +92,12 @@ public class AggregateQueryPageSource
     }
 
     @Override
+    public long getMemoryUsage()
+    {
+        return 0;
+    }
+
+    @Override
     public boolean isFinished()
     {
         return finished;
